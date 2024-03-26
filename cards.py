@@ -3,10 +3,17 @@ import random
 def empty_card_dict():
     return {'3': 0, '4': 0, '5': 0, '6': 0, '7': 0, '8': 0, '9': 0, 'T': 0, 'J': 0, 'Q': 0, 'K': 0, 'A': 0, '2': 0, 'B': 0, 'R': 0}
 
+def full_card_dict():
+    return {'3': 4, '4': 4, '5': 4, '6': 4, '7': 4, '8': 4, '9': 4, 'T': 4, 'J': 4, 'Q': 4, 'K': 4, 'A': 4, '2': 4, 'B': 1, 'R': 1}
+
 def empty_card_id_dict():
     return {'3': [], '4': [], '5': [], '6': [], '7': [], '8': [], '9': [], 'T': [], 'J': [], 'Q': [], 'K': [], 'A': [], '2': [], 'B': [], 'R': []}
 
 def rank(card):
+    cards = '3456789TJQKA2BR'
+    return cards.index(card)
+
+def rank_with_gap(card):
     cards = '3456789TJQKA_2BR'
     return cards.index(card)
 

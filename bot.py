@@ -1,11 +1,11 @@
 import time
 from cards import empty_card_dict, empty_card_id_dict, mapped_values
-from train import dict_to_tensor, get_move_options, position_tensor, remove_move_from_hand_copy
+from train import dict_to_tensor, get_move_options, create_position_tensor, remove_move_from_hand_copy, additional_features_tensor
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import create_engine, text
 import tensorflow as tf
-import requests
 import os
+import json
 
 def get_previous_turn_info(turns):
     if len(turns) > 0:
@@ -16,18 +16,13 @@ def get_previous_turn_info(turns):
             return {'type': turns[1].type, 'size': turns[1].size, 'rank': turns[1].rank}
     return {'type': 'pass', 'size': 0, 'rank': 0}
 
-def get_card_ids(card_dict, choice):
+def get_card_ids(card_dict: dict[str, list], choice: dict[str, int]):
     result_ids = []
-
     for card_value, freq in choice.items():
         if card_value in card_dict:
-            available_ids = card_dict[card_value]
-            if len(available_ids) >= freq:
-                result_ids.extend(available_ids[:freq])
-            else:
-                print(f"Not enough IDs available for card value '{card_value}'. Needed: {freq}, available: {len(available_ids)}")
-        else:
-            print(f"Card value '{card_value}' not found.")
+            card_ids = card_dict[card_value]
+            if len(card_ids) >= freq:
+                result_ids.extend(card_ids[:freq])
 
     return result_ids
 
@@ -37,95 +32,92 @@ def run_background_process():
     engine = create_engine(db_url)
     Session = sessionmaker(bind=engine)
     session = Session()
-    model = tf.keras.models.load_model('my_model.keras')
+    model = tf.keras.models.load_model('new_model.keras')
     while True:
         print('sleep')
-        time.sleep(2)
-        raw_sql = text("""
-            select g.*, h.id as hand_id, h.position as hand_position, h.user_id
-            from games g
-            join rooms r on g.room_id = r.id
-            join hands h on g.id = h.game_id
-            join users u on h.user_id = u.id
-            where g.created_at > current_timestamp - interval '1 hour'
-            and g.landlord_won is null
-            and u.type = 'bot'
-            and g.turn_number % 3 = h.position
-        """)
+        time.sleep(1)
 
-        games = session.execute(raw_sql).fetchall()
-        for game in games:
-            user_id = game.user_id
-            raw_sql = text(f"""
+        requested_predictions = session.execute(text("""
+            select p.*, g.landlord_hand_id from predictions p
+            join games g on p.game_id = g.id
+            where status = 'requested'
+        """)).fetchall()
+
+        for req in requested_predictions:
+
+            cards = session.execute(text(f"""
                 select 
                     c.*, h.position as hand_position, t.number as turn_number
                 from cards c
                 join hands h on c.hand_id = h.id
                 left join turns t on c.turn_id = t.id
-                where c.game_id = {game.id}
-            """)
+                where c.game_id = {req.game_id}
+            """)).fetchall()
 
-            cards = session.execute(raw_sql).fetchall()
-            cardsPersonOnRightHasPlayed = empty_card_dict()
-            cardsPersonOnLeftHasPlayed = empty_card_dict()
-            cardsInHand = empty_card_dict()
-            cardsInHandIDs = empty_card_id_dict()
+            cards_person_on_right_has_played_dict = empty_card_dict()
+            cards_person_on_left_has_played_dict = empty_card_dict()
+            cards_in_hand = empty_card_dict()
+            cards_not_seen = empty_card_dict()
+            cards_in_hand_ids = empty_card_id_dict()
             last_played_turn_number = 0
             landlord_position = 0
             for card in cards:
-                if game.landlord_hand_id == card.hand_id:
+                if req.landlord_hand_id == card.hand_id:
                     landlord_position = card.hand_position
 
                 if card.turn_id != None:
                     if card.turn_number > last_played_turn_number:
                         last_played_turn_number = card.turn_number
-                    if (game.hand_position + 1) % 3 == card.hand_position:
-                        cardsPersonOnRightHasPlayed[mapped_values(card.value)] += 1 
-                    if (game.hand_position - 1) % 3 == card.hand_position:
-                        cardsPersonOnLeftHasPlayed[mapped_values(card.value)] += 1
-                if card.turn_id == None and card.hand_position == game.hand_position:
-                    cardsInHand[mapped_values(card.value)] += 1
-                    cardsInHandIDs[mapped_values(card.value)].append(card.id)
+                    if (req.turn_number + 1) % 3 == card.hand_position:
+                        cards_person_on_right_has_played_dict[mapped_values(card.value)] += 1 
+                    if (req.turn_number - 1) % 3 == card.hand_position:
+                        cards_person_on_left_has_played_dict[mapped_values(card.value)] += 1
+                if card.turn_id == None:
+                    if card.hand_position == req.turn_number % 3:
+                        cards_in_hand[mapped_values(card.value)] += 1
+                        cards_in_hand_ids[mapped_values(card.value)].append(card.id)
+                    else:
+                        cards_not_seen[mapped_values(card.value)] += 1
 
-            positionStuff = position_tensor(landlord_position, game.hand_position, (last_played_turn_number - game.turn_number)%3)
+            position_tensor = create_position_tensor(landlord_position, req.turn_number % 3, (last_played_turn_number - req.turn_number)%3)
             raw_sql = text(f"""
                 select 
                     t.*
                 from turns t
-                where t.game_id = {game.id}
+                where t.game_id = {req.game_id}
                 order by id desc limit 2
             """)
             turns = session.execute(raw_sql).fetchall()
             turn_info = get_previous_turn_info(turns)
-            options = get_move_options(turn_info, cardsInHand)
+            options = get_move_options(turn_info, cards_in_hand)
 
             choice = options[0]
             max_prediction = 0
             for option in options:
-                cardsInOption = dict_to_tensor(option)
-                cardsThatWouldBeRemaining = dict_to_tensor(remove_move_from_hand_copy(cardsInHand, option))
+                cards_that_would_be_remaining_dict = remove_move_from_hand_copy(cards_in_hand, option)
 
                 prediction = model.predict([
-                    dict_to_tensor(cardsPersonOnRightHasPlayed),
-                    dict_to_tensor(cardsPersonOnLeftHasPlayed),
-                    cardsInOption,
-                    cardsThatWouldBeRemaining,
-                    positionStuff,
+                    additional_features_tensor(cards_not_seen),
+                    additional_features_tensor(cards_that_would_be_remaining_dict),
+                    dict_to_tensor(cards_not_seen),
+                    dict_to_tensor(cards_person_on_right_has_played_dict),
+                    dict_to_tensor(cards_person_on_left_has_played_dict),
+                    dict_to_tensor(option),
+                    dict_to_tensor(cards_that_would_be_remaining_dict),
+                    position_tensor,
                 ], verbose=0)
                 
                 if prediction[0][0] > max_prediction:
                     max_prediction = prediction[0][0]
                     choice = option
                 
-            ids = get_card_ids(cardsInHandIDs, choice)
-            data = {
-                'selectedCards': ids,
-                'userID': user_id
-            }
-
-            # url = os.getenv('URL', "'http://localhost:8080")+'/public/CreateTurn'
-            url = 'https://www.doudizhu.online/external/CreateTurn'
-            resp = requests.post(url, json=data)
-            print(resp.status_code, data)
+            ids = get_card_ids(cards_in_hand_ids, choice)
+            session.execute(text("""
+                update predictions
+                set status = 'sent', args = :args
+                where id = :id
+            """), {'args': json.dumps({ 'selected_cards': ids }), 'id': req.id})
+            session.commit()
+            print(ids)
 
 run_background_process()

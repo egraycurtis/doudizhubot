@@ -4,11 +4,25 @@ import tensorflow as tf
 from filtered_options import filtered_options
 from action_space import action_space
 from turn_info import get_turn_info
-from cards import empty_card_dict, shuffle, rank
+from cards import empty_card_dict, full_card_dict, shuffle, rank
+import json
+import threading
+import time
 
+def save_game_data(turns, file_path='game_data.json'):
+    with open(file_path, 'a') as file:
+        for turn in turns:
+            json.dump(turn, file, cls=NumpyEncoder)
+            file.write('\n')
 
-learning_rate = .01
-
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.float32):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return json.JSONEncoder.default(self, obj)
+    
 def get_previous_turn_info(turns):
     if len(turns) > 0:
         if turns[-1]['turn_info']['type'] != 'pass':
@@ -26,7 +40,6 @@ def get_previous_played(turns):
         if turns[-2]['turn_info']['type'] != 'pass':
             return -2
     return 0
-
 
 def can_make_move(move: str, cards_in_hand: dict[str, int]):
     move_frequency = empty_card_dict()
@@ -73,6 +86,12 @@ def remove_choice_from_hand(hand: dict[str, int], move: dict[str, int]):
         hand[card] -= count
     return hand
 
+def cards_not_seen(hand: dict[str, int], cards_played: list[dict[str, int]]):
+    full = full_card_dict()
+    for card in full.keys():
+        full[card] -= (hand[card] + cards_played[0][card] + cards_played[1][card] + cards_played[2][card])
+    return full
+
 def remove_move_from_hand_copy(hand: dict[str, int], move: dict[str, int]):
     hand_copy = hand.copy() 
     for card, count in move.items():
@@ -80,37 +99,67 @@ def remove_move_from_hand_copy(hand: dict[str, int], move: dict[str, int]):
     return hand_copy
 
 def dict_to_tensor(card_dict: dict[str, int]):
-    tensor = np.zeros((4, 16))
+    tensor = np.zeros(54)
     for card, count in card_dict.items():
-        for row in range(count):
-            if row < 4:
-                tensor[row, rank(card)] = 1
+        for i in range(count):
+            tensor[min(4*rank(card) + i, 53)] = 1
 
     return np.expand_dims(tensor, axis=0)
 
-def position_tensor(landlord: int, turn: int, prevTurnOffset: int):
-    # col 1 is landlord position
-    # col 2 is position
-    # col 3 is last turn position
-    tensor = np.zeros((3, 3))
+def additional_features_tensor(card_dict: dict[str, int]):
+    cards = '3456789TJQKA'
+    l = []
+    for i in range(len(cards)): # 36 straights
+        still_going = True
+        for j in range(i, len(cards)):
+            if card_dict[cards[j]] == 1:
+                still_going = False
+            if j - i >= 4:
+                if still_going == True:
+                    l.append(1)
+                else:
+                    l.append(0)
 
-    tensor[landlord, 0] = 1
-    tensor[turn, 1] = 1
-    tensor[(turn+prevTurnOffset)%3, 2] = 1
+    for i in range(len(cards)): # 27 pair straights ignoring len > 5
+        still_going = True
+        for j in range(i, len(cards)):
+            if j - i > 4:
+                break
+            if card_dict[cards[j]] < 2:
+                still_going = False
+            if j - i >= 2:
+                if still_going == True:
+                    l.append(1)
+                else:
+                    l.append(0)
+    
+    for i in range(len(cards)): # 21 triple straights ignoring len > 3
+        still_going = True
+        for j in range(i, len(cards)):
+            if j - i > 2:
+                break
+            if card_dict[cards[j]] < 3:
+                still_going = False
+            if j - i >= 1:
+                if still_going == True:
+                    l.append(1)
+                else:
+                    l.append(0)
+    
+    if card_dict['B'] + card_dict['R'] == 2:
+        l.append(1)
+    else:
+        l.append(0)
 
+    tensor = np.zeros(85)
+    for i in range(len(l)):
+        tensor[i] = l[i]
     return np.expand_dims(tensor, axis=0)
 
-def position_tensor3x2(landlordPos: int, turnPos: int, prevTurnOffset: int):
-    # 0 0 player always pos 1 ie 1 1 would mean user is landlord and was last to play
-    # 1 0 landlord is next
-    # 0 1 prev turn was -1
-    tensor = np.zeros((3, 2))
-    for i in range(2):
-        for j in range(3):
-            tensor[j, i] = -1
-
-    tensor[(landlordPos-turnPos)%3, 0] = 1
-    tensor[prevTurnOffset%3, 1] = 1
+def create_position_tensor(landlordPos: int, turnPos: int, prevTurnOffset: int):
+    tensor = np.zeros(6)
+    tensor[(landlordPos-turnPos)%3] = 1
+    tensor[3 + prevTurnOffset%3] = 1
 
     return np.expand_dims(tensor, axis=0)
 
@@ -130,129 +179,155 @@ def to_string(card_dict: dict[str, int]):
         return 'pass'
     return ''.join(sorted(s, key=rank))
 
-
 def train():
     while True:
-        model = tf.keras.models.load_model('c2_model.keras')
-        hands = shuffle()
-        turns = []
-        cardsSeen = empty_card_dict()
-        cardsPlayedByHand = [empty_card_dict(), empty_card_dict(), empty_card_dict()]
+        num_games = 5
+        threads = []
+        shared_results = [None] * num_games  # Placeholder for game results
+        model = tf.keras.models.load_model('new_model.keras')
+        start_time = time.perf_counter()
 
-        i = 0
-        landlord_position = 0
-        for j in range(len(hands)):
-            if card_count(hands[j]) == 20:
-                landlord_position = j
-                i = j
-                break
+        for i in range(num_games):
+            thread = threading.Thread(target=play_game, args=(model, i, shared_results))
+            threads.append(thread)
+            thread.start()
 
-        landlord_won = False
-        while True:
-            hand = hands[i%3]
-            cardsPersonOnRightHasPlayed = dict_to_tensor(cardsPlayedByHand[(i+1)%3])
-            cardsPersonOnLeftHasPlayed = dict_to_tensor(cardsPlayedByHand[(i-1)%3])
-            positionStuff = position_tensor(landlord_position, i%3, get_previous_played(turns))
+        # Wait for all threads to complete
+        for thread in threads:
+            thread.join()
+        
+        turns = [turn for game_result in shared_results for turn in game_result]
+        print(len(turns))
+        end_time = time.perf_counter()
+        time_delta = end_time - start_time
+        print(f"The function took {time_delta} seconds to complete.")
 
-            turn_info = get_previous_turn_info(turns)
-            options = get_move_options(turn_info, hand)
-
-            choice = options[0]
-            cardsRemaining = dict_to_tensor(remove_move_from_hand_copy(hand, choice))
-            max_prediction = 0
-
-            print()
-            print(to_string(hand))
-            if random.random() < 0.2:
-                choice = random.choice(options)
-                options = [choice]
-                print('random choice')
-            else:
-                print('options:')
-
-            for option in options:
-                cardsInOption = dict_to_tensor(option)
-                cardsThatWouldBeRemaining = dict_to_tensor(remove_move_from_hand_copy(hand, option))
-
-                prediction = model.predict([
-                    cardsPersonOnRightHasPlayed,
-                    cardsPersonOnLeftHasPlayed,
-                    cardsInOption,
-                    cardsThatWouldBeRemaining,
-                    positionStuff,
-                ], verbose=0)
-                
-                print(to_string(option), prediction[0][0])
-
-                if prediction[0][0] > max_prediction:
-                    max_prediction = prediction[0][0]
-                    choice = option
-                    cardsRemaining = cardsThatWouldBeRemaining
-                
-            for card, count in choice.items():
-                cardsSeen[card] += count
-                cardsPlayedByHand[i%3][card] += count
-            
-            print('choice:', to_string(choice))
-
-            turn_info = get_turn_info(choice)
-            turns.append({ 
-                'turn_info': turn_info,
-                'choice': dict_to_tensor(choice),
-                'prediction': max_prediction,
-                'landlord': landlord_position == i%3,
-                'cardsPersonOnRightHasPlayed': cardsPersonOnRightHasPlayed,
-                'cardsPersonOnLeftHasPlayed': cardsPersonOnLeftHasPlayed,
-                'positionStuff': positionStuff,
-                'cardsRemaining': cardsRemaining,
-            })
-            remove_choice_from_hand(hand, choice)
-            if card_count(hands[i%3]) == 0:
-                if landlord_position == i%3:
-                    landlord_won = True
-                    print('landlord_won')
-                else: print('landlord_lost')
-                break
-            i += 1
-
-        for turn in turns:
-            if turn['landlord'] == True:
-                if landlord_won:
-                    turn['prediction'] += 2*learning_rate - learning_rate*turn['prediction']
-                else:
-                    turn['prediction'] -= 2*learning_rate*turn['prediction']
-            else:
-                if landlord_won:
-                    turn['prediction'] -= learning_rate*turn['prediction']
-                else:
-                    turn['prediction'] += learning_rate - learning_rate*turn['prediction']
-
-        x_train_conv1 = []
-        x_train_conv2 = []
-        x_train_conv3 = []
-        x_train_conv4 = []
-        x_train_dense = [] 
-
-        for turn in turns:
-            x_train_conv1.append(turn['cardsPersonOnRightHasPlayed'].reshape(4, 16, 1))
-            x_train_conv2.append(turn['cardsPersonOnLeftHasPlayed'].reshape(4, 16, 1))
-            x_train_conv3.append(turn['choice'].reshape(4, 16, 1)) 
-            x_train_conv4.append(turn['cardsRemaining'].reshape(4, 16, 1))
-            x_train_dense.append(turn['positionStuff'].reshape(3, 3, 1))
-            
-        x_train_conv1 = np.array(x_train_conv1)
-        x_train_conv2 = np.array(x_train_conv2)
-        x_train_conv3 = np.array(x_train_conv3)
-        x_train_conv4 = np.array(x_train_conv4)
-        x_train_dense = np.array(x_train_dense)  
+        i1 = np.array([turn['cards_not_seen_additional_features_tensor'].reshape(85) for turn in turns])
+        i2 = np.array([turn['cards_remaining_additional_feature_tensor'].reshape(85) for turn in turns])
+        i3 = np.array([turn['cards_not_seen_tensor'].reshape(54) for turn in turns])
+        i4 = np.array([turn['cards_person_on_right_has_played_tensor'].reshape(54) for turn in turns])
+        i5 = np.array([turn['cards_person_on_left_has_played_tensor'].reshape(54) for turn in turns])
+        i6 = np.array([turn['choice_tensor'].reshape(54) for turn in turns])
+        i7 = np.array([turn['cards_remaining_tensor'].reshape(54) for turn in turns])
+        i8 = np.array([turn['position_tensor'].reshape(6) for turn in turns])
 
         y_train = np.array([turn['prediction'] for turn in turns])
-        x_train = [x_train_conv1, x_train_conv2, x_train_conv3, x_train_conv4, x_train_dense]
+        x_train = [i1, i2, i3, i4, i5, i6, i7, i8]
 
         model.fit(x_train, y_train, epochs=1, batch_size=32)
-        model.save('c2_model.keras')
+        model.save('new_model.keras')
+
+def play_game(model, game_id, shared_results):
+    learning_rate = .1
+    multiplier = 1
+    show_output = game_id == 0
+    hands = shuffle()
+    turns = []
+    cards_seen = empty_card_dict()
+    cards_played_by_hand = [empty_card_dict(), empty_card_dict(), empty_card_dict()]
+
+    turn_number = 0
+    landlord_position = 0
+    for j in range(len(hands)):
+        if card_count(hands[j]) == 20:
+            landlord_position = j
+            break
+        turn_number += 1
+
+    landlord_won = False
+    while True:
+        turn = turn_number%3
+        hand = hands[turn]
+        cards_person_on_right_has_played_tensor = dict_to_tensor(cards_played_by_hand[(turn+1)%3])
+        cards_person_on_left_has_played_tensor = dict_to_tensor(cards_played_by_hand[(turn-1)%3])
+        position_tensor = create_position_tensor(landlord_position, turn, get_previous_played(turns))
+
+        turn_info = get_previous_turn_info(turns)
+        options = get_move_options(turn_info, hand)
+
+        choice_dict = options[0]
+        cards_remaining_dict = remove_move_from_hand_copy(hand, choice_dict)
+        max_prediction = 0
+
+        cards_not_seen_dict = cards_not_seen(hand, cards_played_by_hand)
+        cards_not_seen_tensor = dict_to_tensor(cards_not_seen_dict)
+        cards_not_seen_additional_features_tensor = additional_features_tensor(cards_not_seen_dict)
+
+        if show_output: print()
+        if turn == landlord_position: 
+            if show_output: print('L')
+        if show_output: print(to_string(hand))
+        if random.random() < 0.2:
+            choice_dict = random.choice(options)
+            options = [choice_dict]
+            if show_output: print('random choice')
+        else:
+            if show_output: print('options:')
+
+        for option_dict in options:
+            cards_that_would_be_remaining_dict = remove_move_from_hand_copy(hand, option_dict)
+
+            prediction = model.predict([
+                cards_not_seen_additional_features_tensor,
+                additional_features_tensor(cards_that_would_be_remaining_dict),
+                cards_not_seen_tensor,
+                cards_person_on_right_has_played_tensor,
+                cards_person_on_left_has_played_tensor,
+                dict_to_tensor(option_dict),
+                dict_to_tensor(cards_that_would_be_remaining_dict),
+                position_tensor,
+            ], verbose=0)
+            
+            if show_output: print(to_string(option_dict), prediction[0][0])
+
+            if prediction[0][0] > max_prediction:
+                max_prediction = prediction[0][0]
+                choice_dict = option_dict
+                cards_remaining_dict = cards_that_would_be_remaining_dict
+            
+        for card, count in choice_dict.items():
+            cards_seen[card] += count
+            cards_played_by_hand[turn][card] += count
+        
+        if show_output: print('choice:', to_string(choice_dict))
+
+        turn_info = get_turn_info(choice_dict)
+        if turn_info['type'] == 'bomb': multiplier *= 2
+        turns.append({ 
+            'turn_info': turn_info,
+            'prediction': max_prediction,
+            'landlord': landlord_position == turn,
+            'cards_not_seen_additional_features_tensor': cards_not_seen_additional_features_tensor,
+            'cards_remaining_additional_feature_tensor': additional_features_tensor(cards_remaining_dict),
+            'cards_not_seen_tensor': cards_not_seen_tensor,
+            'cards_person_on_right_has_played_tensor': cards_person_on_right_has_played_tensor,
+            'cards_person_on_left_has_played_tensor': cards_person_on_left_has_played_tensor,
+            'choice_tensor': dict_to_tensor(choice_dict),
+            'cards_remaining_tensor': dict_to_tensor(cards_remaining_dict),
+            'position_tensor': position_tensor,
+        })
+        if show_output: print (position_tensor)
+        remove_choice_from_hand(hand, choice_dict)
+        if card_count(hands[turn]) == 0:
+            if landlord_position == turn:
+                landlord_won = True
+                if show_output: print('landlord_won')
+            else: 
+                if show_output: print('landlord_lost')
+            break
+        turn_number += 1
+
+    for turn in turns:
+        # reward_multiplier = 1 + (multiplier - 1) * ((turn['landlord'] == True) + 1) * learning_rate
+        if turn['landlord'] == landlord_won:
+            turn['prediction'] += learning_rate * (1 - turn['prediction'])  
+        else:
+            turn['prediction'] -= learning_rate * turn['prediction']
+
+    shared_results[game_id] = turns
 
 if __name__ == "__main__":
     train()
 
+2* 4* .0001
 
