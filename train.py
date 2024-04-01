@@ -57,7 +57,7 @@ def string_to_card_dict(action: str):
         d[a] += 1
     return d
 
-def get_move_options(info, hand: dict[str, int]):
+def get_move_options(info, hand: dict[str, int]) -> list[dict[str, int]]:
     options = []
     actions = []
     if info['type'] == 'pass':
@@ -181,7 +181,7 @@ def to_string(card_dict: dict[str, int]):
 
 def train():
     while True:
-        num_games = 5
+        num_games = 50
         threads = []
         shared_results = [None] * num_games  # Placeholder for game results
         model = tf.keras.models.load_model('new_model.keras')
@@ -196,11 +196,15 @@ def train():
         for thread in threads:
             thread.join()
         
-        turns = [turn for game_result in shared_results for turn in game_result]
+        turns = []
+        for game_result in shared_results:
+            if game_result is not None:  # Ensure game_result is not None
+                turns.extend(game_result)
+
         print(len(turns))
         end_time = time.perf_counter()
         time_delta = end_time - start_time
-        print(f"The function took {time_delta} seconds to complete.")
+        print(f"round took {time_delta} seconds")
 
         i1 = np.array([turn['cards_not_seen_additional_features_tensor'].reshape(85) for turn in turns])
         i2 = np.array([turn['cards_remaining_additional_feature_tensor'].reshape(85) for turn in turns])
@@ -263,28 +267,47 @@ def play_game(model, game_id, shared_results):
             if show_output: print('random choice')
         else:
             if show_output: print('options:')
-
+            
+        all_cards_remaining_dict = []
+        feature_tensors_list = [[] for _ in range(8)]  
+        
         for option_dict in options:
             cards_that_would_be_remaining_dict = remove_move_from_hand_copy(hand, option_dict)
+            all_cards_remaining_dict.append(cards_that_would_be_remaining_dict)
 
-            prediction = model.predict([
-                cards_not_seen_additional_features_tensor,
-                additional_features_tensor(cards_that_would_be_remaining_dict),
-                cards_not_seen_tensor,
-                cards_person_on_right_has_played_tensor,
-                cards_person_on_left_has_played_tensor,
-                dict_to_tensor(option_dict),
-                dict_to_tensor(cards_that_would_be_remaining_dict),
-                position_tensor,
-            ], verbose=0)
-            
-            if show_output: print(to_string(option_dict), prediction[0][0])
+            feature_tensors = [
+                cards_not_seen_additional_features_tensor.reshape(85),
+                additional_features_tensor(cards_that_would_be_remaining_dict).reshape(85),
+                cards_not_seen_tensor.reshape(54),
+                cards_person_on_right_has_played_tensor.reshape(54),
+                cards_person_on_left_has_played_tensor.reshape(54),
+                dict_to_tensor(option_dict).reshape(54),
+                dict_to_tensor(cards_that_would_be_remaining_dict).reshape(54),
+                position_tensor.reshape(6),
+            ]
 
-            if prediction[0][0] > max_prediction:
-                max_prediction = prediction[0][0]
-                choice_dict = option_dict
-                cards_remaining_dict = cards_that_would_be_remaining_dict
-            
+            for i, tensor in enumerate(feature_tensors):
+                feature_tensors_list[i].append(tensor)
+
+        # Prepare the input tensors for the model
+        model_input_tensors = [np.array(feature_list) for feature_list in feature_tensors_list]
+
+        predictions = model.predict(model_input_tensors, verbose=0)
+
+        if predictions.ndim > 1:
+            predictions = predictions.flatten()
+
+        # Iterate over each option and its prediction
+        for i, option_dict in enumerate(options):
+            prediction = predictions[i]
+            if show_output:
+                print(f"Option: {to_string(option_dict)}, Prediction: {prediction}")
+
+        max_prediction_index = np.argmax(predictions)
+        choice_dict = options[max_prediction_index]
+        cards_remaining_dict = all_cards_remaining_dict[max_prediction_index]
+        max_prediction = predictions[max_prediction_index]
+
         for card, count in choice_dict.items():
             cards_seen[card] += count
             cards_played_by_hand[turn][card] += count
@@ -327,7 +350,10 @@ def play_game(model, game_id, shared_results):
     shared_results[game_id] = turns
 
 if __name__ == "__main__":
-    train()
+    while True:
+        try:
+            train()
+        except:
+            pass
 
-2* 4* .0001
 

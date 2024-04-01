@@ -9,7 +9,7 @@ from cards import empty_card_dict, shuffle
 
 def gulag():
     model1 = tf.keras.models.load_model('new_model_save8.keras')
-    model2 = tf.keras.models.load_model('new_model.keras')
+    model2 = tf.keras.models.load_model('model_save.keras')
     model3 = tf.keras.models.load_model('new_model.keras')
     models = [model1, model2, model3]
     model_wins = [0, 0, 0]

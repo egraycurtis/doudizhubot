@@ -1,11 +1,13 @@
 import time
 from cards import empty_card_dict, empty_card_id_dict, mapped_values
-from train import dict_to_tensor, get_move_options, create_position_tensor, remove_move_from_hand_copy, additional_features_tensor
+from train import dict_to_tensor, get_move_options, create_position_tensor, remove_move_from_hand_copy, additional_features_tensor, to_string
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import create_engine, text
 import tensorflow as tf
 import os
 import json
+
+from turn_info import expected_value
 
 def get_previous_turn_info(turns):
     if len(turns) > 0:
@@ -34,9 +36,7 @@ def run_background_process():
     session = Session()
     model = tf.keras.models.load_model('new_model.keras')
     while True:
-        print('sleep')
         time.sleep(1)
-
         requested_predictions = session.execute(text("""
             select p.*, g.landlord_hand_id from predictions p
             join games g on p.game_id = g.id
@@ -92,9 +92,9 @@ def run_background_process():
             options = get_move_options(turn_info, cards_in_hand)
 
             choice = options[0]
-            max_prediction = 0
-            for option in options:
-                cards_that_would_be_remaining_dict = remove_move_from_hand_copy(cards_in_hand, option)
+            max_expected_value = -1
+            for option_dict in options:
+                cards_that_would_be_remaining_dict = remove_move_from_hand_copy(cards_in_hand, option_dict)
 
                 prediction = model.predict([
                     additional_features_tensor(cards_not_seen),
@@ -102,14 +102,17 @@ def run_background_process():
                     dict_to_tensor(cards_not_seen),
                     dict_to_tensor(cards_person_on_right_has_played_dict),
                     dict_to_tensor(cards_person_on_left_has_played_dict),
-                    dict_to_tensor(option),
+                    dict_to_tensor(option_dict),
                     dict_to_tensor(cards_that_would_be_remaining_dict),
                     position_tensor,
                 ], verbose=0)
-                
-                if prediction[0][0] > max_prediction:
-                    max_prediction = prediction[0][0]
-                    choice = option
+
+                probability_of_winning = prediction[0][0]
+                exp_val = expected_value(probability_of_winning, option_dict, cards_that_would_be_remaining_dict)
+                print(to_string(option_dict), probability_of_winning, exp_val)
+                if exp_val > max_expected_value:
+                    max_expected_value = exp_val
+                    choice = option_dict
                 
             ids = get_card_ids(cards_in_hand_ids, choice)
             session.execute(text("""

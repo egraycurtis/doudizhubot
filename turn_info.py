@@ -87,6 +87,46 @@ def bomb_with_discards_rank(cards):
             return rank_with_gap(cards[i])
     return 0
 
+
+def expected_value(win_probability: float, option_dict: dict[str, int], cards_remaining_dict: dict[str, int]) -> int:
+    remaining_cards_multiplier = 1
+    if win_probability > .5:
+        if cards_remaining_dict['B'] + cards_remaining_dict['R'] == 2:
+            remaining_cards_multiplier *= 2
+        
+        for count in cards_remaining_dict.values():
+            if count == 4:
+                remaining_cards_multiplier *= 2
+
+    option_multiplier = 1
+    has_four_of_a_kind = False
+    total_count = 0
+    for count in option_dict.values():
+        total_count += count
+        if count == 4:
+            has_four_of_a_kind = True
+
+    if (option_dict['B'] + option_dict['R'] == 2 and total_count == 2 ) or (has_four_of_a_kind and total_count == 4):
+        option_multiplier = 2
+
+    return remaining_cards_multiplier * option_multiplier * (win_probability - .5)
+
+def choice_bomb_multiplier(card_dict: dict[str, int]) -> int:
+    if card_dict['B'] + card_dict['R'] == 2:
+        return 2
+    
+    has_four_of_a_kind = False
+    total_count = 0
+    for count in card_dict.values():
+        total_count += count
+        if count == 4:
+            has_four_of_a_kind = True
+
+    if has_four_of_a_kind and total_count == 4:
+        return 2
+
+    return 1
+
 def get_turn_info(card_dict: dict[str, int]):
     cards = []
     for card, count in card_dict.items():
