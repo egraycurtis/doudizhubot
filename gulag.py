@@ -8,9 +8,9 @@ from turn_info import get_turn_info
 from cards import empty_card_dict, shuffle
 
 def gulag():
-    model1 = tf.keras.models.load_model('new_model_save8.keras')
+    model1 = tf.keras.models.load_model('model_save_3.keras')
     model2 = tf.keras.models.load_model('model_save.keras')
-    model3 = tf.keras.models.load_model('new_model.keras')
+    model3 = tf.keras.models.load_model('model_save_2.keras')
     models = [model1, model2, model3]
     model_wins = [0, 0, 0]
     while True:
@@ -47,24 +47,40 @@ def gulag():
             cards_not_seen_tensor = dict_to_tensor(cards_not_seen_dict)
             cards_not_seen_additional_features_tensor = additional_features_tensor(cards_not_seen_dict)
 
+            all_cards_remaining_dict = []
+            feature_tensors_list = [[] for _ in range(8)]  
+
             for option_dict in options:
                 cards_that_would_be_remaining_dict = remove_move_from_hand_copy(hand, option_dict)
+                all_cards_remaining_dict.append(cards_that_would_be_remaining_dict)
 
-                prediction = model.predict([
-                    cards_not_seen_additional_features_tensor,
-                    additional_features_tensor(cards_that_would_be_remaining_dict),
-                    cards_not_seen_tensor,
-                    cards_person_on_right_has_played_tensor,
-                    cards_person_on_left_has_played_tensor,
-                    dict_to_tensor(option_dict),
-                    dict_to_tensor(cards_that_would_be_remaining_dict),
-                    position_tensor,
-                ], verbose=0)
-                
-                if prediction[0][0] > max_prediction:
-                    max_prediction = prediction[0][0]
-                    choice_dict = option_dict
-                    cards_remaining_dict = cards_that_would_be_remaining_dict
+                feature_tensors = [
+                    cards_not_seen_additional_features_tensor.reshape(85),
+                    additional_features_tensor(cards_that_would_be_remaining_dict).reshape(85),
+                    cards_not_seen_tensor.reshape(54),
+                    cards_person_on_right_has_played_tensor.reshape(54),
+                    cards_person_on_left_has_played_tensor.reshape(54),
+                    dict_to_tensor(option_dict).reshape(54),
+                    dict_to_tensor(cards_that_would_be_remaining_dict).reshape(54),
+                    position_tensor.reshape(6),
+                ]
+
+                for i, tensor in enumerate(feature_tensors):
+                    feature_tensors_list[i].append(tensor)
+
+            # Prepare the input tensors for the model
+            model_input_tensors = [np.array(feature_list) for feature_list in feature_tensors_list]
+
+            predictions = model.predict(model_input_tensors, verbose=0)
+
+            if predictions.ndim > 1:
+                predictions = predictions.flatten()
+
+            max_prediction_index = np.argmax(predictions)
+            choice_dict = options[max_prediction_index]
+            cards_remaining_dict = all_cards_remaining_dict[max_prediction_index]
+            max_prediction = predictions[max_prediction_index]
+
                 
             for card, count in choice_dict.items():
                 cards_seen[card] += count
@@ -89,14 +105,11 @@ def gulag():
             if card_count(hand) == 0:
                 if landlord_position == turn:
                     print('landlord_won')
-                    model_wins[landlord_position%3] += 2*multiplier
-                    model_wins[(landlord_position-1)%3] -= 1*multiplier
-                    model_wins[(landlord_position+1)%3] -= 1*multiplier
+                    model_wins[landlord_position%3] += 1
                 else: 
                     print('landlord_lost')
-                    model_wins[landlord_position%3] -= 2*multiplier
-                    model_wins[(landlord_position-1)%3] += 1*multiplier
-                    model_wins[(landlord_position+1)%3] += 1*multiplier
+                    model_wins[(landlord_position-1)%3] += 1
+                    model_wins[(landlord_position+1)%3] += 1
                 break
             turn_number += 1
 

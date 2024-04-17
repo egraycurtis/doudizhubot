@@ -4,7 +4,7 @@ import tensorflow as tf
 from filtered_options import filtered_options
 from action_space import action_space
 from turn_info import get_turn_info
-from cards import empty_card_dict, full_card_dict, shuffle, rank
+from cards import card_count, empty_card_dict, full_card_dict, shuffle, rank
 import json
 import threading
 import time
@@ -163,13 +163,6 @@ def create_position_tensor(landlordPos: int, turnPos: int, prevTurnOffset: int):
 
     return np.expand_dims(tensor, axis=0)
 
-def card_count(card_dict: dict[str, int]):
-    count = 0
-    for _, c in card_dict.items():
-        count += c
-    return count
-
-
 def to_string(card_dict: dict[str, int]):
     s = ''
     for card, c in card_dict.items():
@@ -178,53 +171,14 @@ def to_string(card_dict: dict[str, int]):
     if s == '': 
         return 'pass'
     return ''.join(sorted(s, key=rank))
-
-def train():
-    while True:
-        num_games = 50
-        threads = []
-        shared_results = [None] * num_games  # Placeholder for game results
-        model = tf.keras.models.load_model('new_model.keras')
-        start_time = time.perf_counter()
-
-        for i in range(num_games):
-            thread = threading.Thread(target=play_game, args=(model, i, shared_results))
-            threads.append(thread)
-            thread.start()
-
-        # Wait for all threads to complete
-        for thread in threads:
-            thread.join()
         
-        turns = []
-        for game_result in shared_results:
-            if game_result is not None:  # Ensure game_result is not None
-                turns.extend(game_result)
-
-        print(len(turns))
-        end_time = time.perf_counter()
-        time_delta = end_time - start_time
-        print(f"round took {time_delta} seconds")
-
-        i1 = np.array([turn['cards_not_seen_additional_features_tensor'].reshape(85) for turn in turns])
-        i2 = np.array([turn['cards_remaining_additional_feature_tensor'].reshape(85) for turn in turns])
-        i3 = np.array([turn['cards_not_seen_tensor'].reshape(54) for turn in turns])
-        i4 = np.array([turn['cards_person_on_right_has_played_tensor'].reshape(54) for turn in turns])
-        i5 = np.array([turn['cards_person_on_left_has_played_tensor'].reshape(54) for turn in turns])
-        i6 = np.array([turn['choice_tensor'].reshape(54) for turn in turns])
-        i7 = np.array([turn['cards_remaining_tensor'].reshape(54) for turn in turns])
-        i8 = np.array([turn['position_tensor'].reshape(6) for turn in turns])
-
-        y_train = np.array([turn['prediction'] for turn in turns])
-        x_train = [i1, i2, i3, i4, i5, i6, i7, i8]
-
-        model.fit(x_train, y_train, epochs=1, batch_size=32)
-        model.save('new_model.keras')
-
-def play_game(model, game_id, shared_results):
+def train():
     learning_rate = .1
     multiplier = 1
-    show_output = game_id == 0
+    model = tf.keras.models.load_model('new_model.keras')
+    start_time = time.perf_counter()
+    # show_output = game_id == 0
+    show_output = True
     hands = shuffle()
     turns = []
     cards_seen = empty_card_dict()
@@ -270,7 +224,7 @@ def play_game(model, game_id, shared_results):
             
         all_cards_remaining_dict = []
         feature_tensors_list = [[] for _ in range(8)]  
-        
+
         for option_dict in options:
             cards_that_would_be_remaining_dict = remove_move_from_hand_copy(hand, option_dict)
             all_cards_remaining_dict.append(cards_that_would_be_remaining_dict)
@@ -347,13 +301,29 @@ def play_game(model, game_id, shared_results):
         else:
             turn['prediction'] -= learning_rate * turn['prediction']
 
-    shared_results[game_id] = turns
+    end_time = time.perf_counter()
+    time_delta = end_time - start_time
+    print(f"round took {time_delta} seconds")
+
+    i1 = np.array([turn['cards_not_seen_additional_features_tensor'].reshape(85) for turn in turns])
+    i2 = np.array([turn['cards_remaining_additional_feature_tensor'].reshape(85) for turn in turns])
+    i3 = np.array([turn['cards_not_seen_tensor'].reshape(54) for turn in turns])
+    i4 = np.array([turn['cards_person_on_right_has_played_tensor'].reshape(54) for turn in turns])
+    i5 = np.array([turn['cards_person_on_left_has_played_tensor'].reshape(54) for turn in turns])
+    i6 = np.array([turn['choice_tensor'].reshape(54) for turn in turns])
+    i7 = np.array([turn['cards_remaining_tensor'].reshape(54) for turn in turns])
+    i8 = np.array([turn['position_tensor'].reshape(6) for turn in turns])
+
+    y_train = np.array([turn['prediction'] for turn in turns])
+    x_train = [i1, i2, i3, i4, i5, i6, i7, i8]
+
+    model.fit(x_train, y_train, epochs=1, batch_size=32)
+    model.save('new_model.keras')
+
 
 if __name__ == "__main__":
+    print ('running')
     while True:
-        try:
-            train()
-        except:
-            pass
+        train()
 
 

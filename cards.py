@@ -50,6 +50,27 @@ def shuffle():
 
     return hands
 
+def card_count(card_dict: dict[str, int]):
+    count = 0
+    for _, c in card_dict.items():
+        count += c
+    return count
+
+def landlord_first_shuffle():
+    hands = shuffle()
+    lfhands = []
+    for i in range(6):
+        hand = hands[i%3]
+        if len(lfhands) == 0:
+            if card_count(hand) == 20:
+                lfhands.append(hand)
+        elif len(lfhands) == 3:
+            break
+        else:
+            lfhands.append(hand)
+
+    return lfhands
+
 def has_three_trumps(hand: dict[str, int]):
     trumps = 0
     trumps += hand['B']
