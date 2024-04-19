@@ -1,0 +1,19 @@
+version: "3.6"
+services:
+  db:
+    image: postgres:13 # use CloudSQL version used in production
+    environment:
+      POSTGRES_PASSWORD: password
+    volumes:
+      - ddzb-data:/var/lib/postgresql/data/
+      # provisioning scripts are run in alphabetical order
+      - ./scripts/docker-compose/provision_maindb.sql:/docker-entrypoint-initdb.d/1_provision_maindb.sql
+    restart: unless-stopped
+    command:
+      - postgres
+      - -c
+      - log_statement=all
+    ports:
+      - "5432:5432"
+volumes:
+  ddzb-data:

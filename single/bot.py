@@ -1,5 +1,4 @@
 import time
-from batch_train_simple import create_last_played_tensor
 from cards import empty_card_dict, empty_card_id_dict, mapped_values
 from train import dict_to_tensor, get_move_options, create_position_tensor, remove_move_from_hand_copy, additional_features_tensor, to_string
 from sqlalchemy.orm import sessionmaker
@@ -7,7 +6,7 @@ from sqlalchemy import create_engine, text
 import tensorflow as tf
 import os
 import json
-import numpy as np
+
 from turn_info import expected_value
 
 def get_previous_turn_info(turns):
@@ -29,36 +28,17 @@ def get_card_ids(card_dict: dict[str, list], choice: dict[str, int]):
 
     return result_ids
 
-def cards_left_tensor(cards_played_by_hand: dict[str, int], position: int):
-
-    cards_left = 17
-    if position == 0:
-        cards_left = 20
-
-    for _, c in cards_played_by_hand.items():
-        cards_left -= c
-    
-    tensor = np.zeros(5)
-    if cards_left < 6: tensor[cards_left-1] = 1
-    return np.expand_dims(tensor, axis=0)
-
 def run_background_process():
-    # db_url = os.getenv('DATABASE_URL', "postgresql://postgres:password@localhost:5432/ddz")
-    db_url = 'postgresql://dpawcqez:bgMMRQdd4FS4-kCRcDiCjg48rUi5yqd3@castor.db.elephantsql.com/dpawcqez'
+    db_url = os.getenv('DATABASE_URL', "postgresql://postgres:password@localhost:5432/ddz")
+    # db_url = 'postgresql://dpawcqez:bgMMRQdd4FS4-kCRcDiCjg48rUi5yqd3@castor.db.elephantsql.com/dpawcqez'
     engine = create_engine(db_url)
     Session = sessionmaker(bind=engine)
     session = Session()
-    p0 = tf.keras.models.load_model('ps0.keras')
-    p1 = tf.keras.models.load_model('ps1.keras')
-    p2 = tf.keras.models.load_model('ps2.keras')
-    models = [p0, p1, p2]
+    model = tf.keras.models.load_model('model_save_2.keras')
     while True:
         time.sleep(1)
         requested_predictions = session.execute(text("""
-            select 
-                p.*,
-                g.landlord_hand_id 
-            from predictions p
+            select p.*, g.landlord_hand_id from predictions p
             join games g on p.game_id = g.id
             where status = 'requested'
         """)).fetchall()
@@ -67,48 +47,39 @@ def run_background_process():
 
             cards = session.execute(text(f"""
                 select 
-                    c.*,
-                    h.position as hand_position,
-                    t.number as turn_number
+                    c.*, h.position as hand_position, t.number as turn_number
                 from cards c
                 join hands h on c.hand_id = h.id
                 left join turns t on c.turn_id = t.id
                 where c.game_id = {req.game_id}
             """)).fetchall()
 
-            cards_person_on_left_has_played_dict = empty_card_dict()
             cards_person_on_right_has_played_dict = empty_card_dict()
+            cards_person_on_left_has_played_dict = empty_card_dict()
             cards_in_hand = empty_card_dict()
-            cards_not_seen_dict = empty_card_dict()
+            cards_not_seen = empty_card_dict()
             cards_in_hand_ids = empty_card_id_dict()
-            previous_turn_dict = empty_card_dict()
-            penultimate_turn_dict = empty_card_dict()
-            landlord_offset = 0
+            last_played_turn_number = 0
+            landlord_position = 0
             for card in cards:
                 if req.landlord_hand_id == card.hand_id:
-                    landlord_offset = card.hand_position
+                    landlord_position = card.hand_position
 
                 if card.turn_id != None:
-                    if (req.turn_number - 1) % 3 == card.hand_position:
-                        cards_person_on_left_has_played_dict[mapped_values(card.value)] += 1
+                    if card.turn_number > last_played_turn_number:
+                        last_played_turn_number = card.turn_number
                     if (req.turn_number + 1) % 3 == card.hand_position:
                         cards_person_on_right_has_played_dict[mapped_values(card.value)] += 1 
-                    
-                    if (req.turn_number - 1) == card.turn_id:
-                        previous_turn_dict[mapped_values(card.value)] += 1
-                    if (req.turn_number - 2) == card.turn_id:
-                        penultimate_turn_dict[mapped_values(card.value)] += 1
-
+                    if (req.turn_number - 1) % 3 == card.hand_position:
+                        cards_person_on_left_has_played_dict[mapped_values(card.value)] += 1
                 if card.turn_id == None:
                     if card.hand_position == req.turn_number % 3:
                         cards_in_hand[mapped_values(card.value)] += 1
                         cards_in_hand_ids[mapped_values(card.value)].append(card.id)
                     else:
-                        cards_not_seen_dict[mapped_values(card.value)] += 1
+                        cards_not_seen[mapped_values(card.value)] += 1
 
-
-
-
+            position_tensor = create_position_tensor(landlord_position, req.turn_number % 3, (last_played_turn_number - req.turn_number)%3)
             raw_sql = text(f"""
                 select 
                     t.*
@@ -120,36 +91,20 @@ def run_background_process():
             turn_info = get_previous_turn_info(turns)
             options = get_move_options(turn_info, cards_in_hand)
 
-            last_played_tensor = create_last_played_tensor(0)
-            if len(turns) > 0:
-                if turns[0].type != 'pass':
-                    last_played_tensor = create_last_played_tensor(1)
-                elif len(turns) > 1 and turns[1] != 'pass':
-                    last_played_tensor = create_last_played_tensor(2)
-
-            position = (req.turn_number-landlord_offset)%3
-            cards_person_on_left_has_left_tensor = cards_left_tensor(cards_person_on_left_has_played_dict, (position - 1)%3)
-            cards_person_on_right_has_left_tensor = cards_left_tensor(cards_person_on_right_has_played_dict, (position + 1)%3)
-            print()
-            print(position)
-            print()
-            model = models[position]
             choice = options[0]
             max_expected_value = -1
             for option_dict in options:
                 cards_that_would_be_remaining_dict = remove_move_from_hand_copy(cards_in_hand, option_dict)
 
                 prediction = model.predict([
-                    additional_features_tensor(cards_not_seen_dict),
+                    additional_features_tensor(cards_not_seen),
                     additional_features_tensor(cards_that_would_be_remaining_dict),
-                    dict_to_tensor(cards_not_seen_dict),
+                    dict_to_tensor(cards_not_seen),
                     dict_to_tensor(cards_person_on_right_has_played_dict),
                     dict_to_tensor(cards_person_on_left_has_played_dict),
                     dict_to_tensor(option_dict),
                     dict_to_tensor(cards_that_would_be_remaining_dict),
-                    last_played_tensor,
-                    cards_person_on_left_has_left_tensor,
-                    cards_person_on_right_has_left_tensor,
+                    position_tensor,
                 ], verbose=0)
 
                 probability_of_winning = prediction[0][0]
