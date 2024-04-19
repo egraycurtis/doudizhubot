@@ -268,6 +268,7 @@ def train():
         
         if show_output: print('choice:', to_string(choice_dict))
 
+        # turn info is 'type' 'rank' 'size'
         turn_info = get_turn_info(choice_dict)
         if turn_info['type'] == 'bomb': multiplier *= 2
         turns.append({ 

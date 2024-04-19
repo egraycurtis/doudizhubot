@@ -8,8 +8,8 @@ from turn_info import get_turn_info
 from cards import empty_card_dict, shuffle
 
 def gulag():
-    model1 = tf.keras.models.load_model('model_save_3.keras')
-    model2 = tf.keras.models.load_model('model_save.keras')
+    model1 = tf.keras.models.load_model('new_model9lowering_learning_rate.keras')
+    model2 = tf.keras.models.load_model('new_model.keras')
     model3 = tf.keras.models.load_model('model_save_2.keras')
     models = [model1, model2, model3]
     model_wins = [0, 0, 0]
