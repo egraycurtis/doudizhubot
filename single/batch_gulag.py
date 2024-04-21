@@ -3,7 +3,7 @@ import numpy as np
 import tensorflow as tf
 from filtered_options import filtered_options
 from action_space import action_space
-from train import create_position_tensor
+from single.train import create_position_tensor
 from turn_info import get_turn_info
 from cards import empty_card_dict, full_card_dict, landlord_first_shuffle, shuffle, rank
 import json

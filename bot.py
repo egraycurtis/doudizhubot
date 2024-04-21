@@ -1,7 +1,7 @@
 import time
-from batch_train_simple import create_last_played_tensor
+from self_play import create_last_played_tensor
 from cards import empty_card_dict, empty_card_id_dict, mapped_values
-from train import dict_to_tensor, get_move_options, create_position_tensor, remove_move_from_hand_copy, additional_features_tensor, to_string
+from single.train import dict_to_tensor, get_move_options, create_position_tensor, remove_move_from_hand_copy, additional_features_tensor, to_string
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import create_engine, text
 import tensorflow as tf
@@ -48,9 +48,9 @@ def run_background_process():
     engine = create_engine(db_url)
     Session = sessionmaker(bind=engine)
     session = Session()
-    p0 = tf.keras.models.load_model('ps0.keras')
-    p1 = tf.keras.models.load_model('ps1.keras')
-    p2 = tf.keras.models.load_model('ps2.keras')
+    p0 = tf.keras.models.load_model('deep0.keras')
+    p1 = tf.keras.models.load_model('deep1.keras')
+    p2 = tf.keras.models.load_model('deep2.keras')
     models = [p0, p1, p2]
     while True:
         time.sleep(1)

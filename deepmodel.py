@@ -2,6 +2,7 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.keras import layers, models, Input
 
+
 def create_model():
     i1 = Input(shape=(85))
     i2 = Input(shape=(85))
@@ -15,9 +16,10 @@ def create_model():
     i10 = Input(shape=(5))
     merged = layers.concatenate([i1, i2, i3, i4, i5, i6, i7, i8, i9, i10])
 
-    dense1 = layers.Dense(128, activation='relu')(merged)
-    dense2 = layers.Dense(64, activation='relu')(dense1)
-    output = layers.Dense(1, activation='sigmoid')(dense2)
+    dense1 = layers.Dense(256, activation='relu')(merged)
+    dense2 = layers.Dense(128, activation='relu')(dense1)
+    dense3 = layers.Dense(64, activation='relu')(dense2)
+    output = layers.Dense(1, activation='sigmoid')(dense3)
 
     model = models.Model(inputs=[i1, i2, i3, i4, i5, i6, i7, i8, i9, i10], outputs=output)
     model.compile(optimizer='adam', loss='mean_squared_error', metrics=['mae'])
@@ -44,13 +46,13 @@ x_train, y_train = generate_dummy_data()
 
 model.fit(x_train, y_train, epochs=25, batch_size=32)
 
-model.save('ps0.keras')
-model.save('ps1.keras')
-model.save('ps2.keras')
+model.save('deep0.keras')
+model.save('deep1.keras')
+model.save('deep2.keras')
 
 print("Model saved successfully.")
 
-loaded_model = tf.keras.models.load_model('ps0.keras')
+loaded_model = tf.keras.models.load_model('deep0.keras')
 
 
 i1 = np.random.rand(1, 85)

@@ -1,6 +1,6 @@
 import time
 from cards import empty_card_dict, empty_card_id_dict, mapped_values
-from train import dict_to_tensor, get_move_options, create_position_tensor, remove_move_from_hand_copy, additional_features_tensor, to_string
+from single.train import dict_to_tensor, get_move_options, create_position_tensor, remove_move_from_hand_copy, additional_features_tensor, to_string
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import create_engine, text
 import tensorflow as tf
