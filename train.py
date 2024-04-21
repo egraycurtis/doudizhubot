@@ -3,10 +3,9 @@ import numpy as np
 import tensorflow as tf
 import time
 
-def train(db_path="postgresql://postgres:password@localhost:5432"):
-    conn = psycopg2.connect(db_path)
+def train():
+    conn = psycopg2.connect("postgresql://postgres:password@localhost:5432")
     cursor = conn.cursor()
-
     try:
         cursor.execute("select count(*) from game_turns")
         count = cursor.fetchone()[0]
@@ -16,16 +15,23 @@ def train(db_path="postgresql://postgres:password@localhost:5432"):
             data = cursor.fetchall()
             turn_data = [turn[1]['turns_by_position'] for turn in data]
 
+            sum_error = 0.0
+            turn_count = 0
             turns_by_position = [[],[],[]]
             for tbp in turn_data:
                 for i in range(3):
                     for turn in tbp[i]:
                         turns_by_position[i].append(turn)
-            ids_to_delete = [turn[0] for turn in data]
+                        sum_error += turn['error']
+                        turn_count += 1
+
+            mean_error = sum_error/turn_count
+
+            ids_to_delete = [row[0] for row in data]
             
-            p0 = tf.keras.models.load_model('p0.keras')
-            p1 = tf.keras.models.load_model('p1.keras')
-            p2 = tf.keras.models.load_model('p2.keras')
+            p0 = tf.keras.models.load_model('deeper0.keras')
+            p1 = tf.keras.models.load_model('deeper1.keras')
+            p2 = tf.keras.models.load_model('deeper2.keras')
             models = [p0, p1, p2]
             for i in range(3):
                 turns = turns_by_position[i]
@@ -46,21 +52,26 @@ def train(db_path="postgresql://postgres:password@localhost:5432"):
                 x_train = [i1, i2, i3, i4, i5, i6, i7, i8, i9, i10]
 
                 model.fit(x_train, y_train, epochs=1, batch_size=64)
-                model.save(f"p{i}.keras")
+                model.save(f"deeper{i}.keras")
             
             delete_query = "delete from game_turns where id = any(%s)"
             cursor.execute(delete_query, (ids_to_delete,))
             conn.commit()
-            print(f"Trained on {len(ids_to_delete)} entries and deleted them from the database.")
-
+            return count*50, mean_error
+            
     except Exception as e:
         print(e)
-        conn.rollback()
+        pass
     finally:
         conn.close()
        
 
 if __name__ == "__main__":
+    game_count = 0
     while True:
-        train()
-        time.sleep(5)
+        try:
+            count, error = train()
+            game_count += count
+            print(f"games played so far: {game_count}, error: {error:.4f}")
+            time.sleep(5)
+        except: pass
