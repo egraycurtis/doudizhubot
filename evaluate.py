@@ -8,27 +8,27 @@ from cards import empty_card_dict, full_card_dict, landlord_first_shuffle, rank
 
 def evaluate():
     model1 = [
-        tf.keras.models.load_model('p0.keras'),
-        tf.keras.models.load_model('p1.keras'),
-        tf.keras.models.load_model('p2.keras'),
+        tf.keras.models.load_model('deeperer0.keras'),
+        tf.keras.models.load_model('deeperer1.keras'),
+        tf.keras.models.load_model('deeperer2.keras'),
         ]
     
     model2 = [
-        tf.keras.models.load_model('deep0.keras'),
-        tf.keras.models.load_model('deep1.keras'),
-        tf.keras.models.load_model('deep2.keras'),
+        tf.keras.models.load_model('shallow0.keras'),
+        tf.keras.models.load_model('shallow1.keras'),
+        tf.keras.models.load_model('shallow2.keras'),
         ]
     
     model3 = [
-        tf.keras.models.load_model('deeper0.keras'),
-        tf.keras.models.load_model('deeper1.keras'),
-        tf.keras.models.load_model('deeper2.keras'),
+        tf.keras.models.load_model('shallowish0.keras'),
+        tf.keras.models.load_model('shallowish1.keras'),
+        tf.keras.models.load_model('shallowish2.keras'),
         ]
     
     models = [model1, model2, model3]
     model_wins = [0, 0, 0]
     for landlord_offset in range(3):
-        game_batch_size = 1000
+        game_batch_size = 50
         game_states = [{
             'complete': False,
             'number': i,

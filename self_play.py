@@ -7,6 +7,7 @@ from turn_info import get_turn_info
 from cards import empty_card_dict, full_card_dict, landlord_first_shuffle, rank
 import json
 import psycopg2
+import multiprocessing
 
 def self_play(partition):
     while True:
@@ -380,6 +381,8 @@ def to_string(card_dict: dict[str, int]):
     return ''.join(sorted(s, key=rank))
 
 if __name__ == "__main__":
-    self_play()
+    cpu_count = multiprocessing.cpu_count()
+    with multiprocessing.Pool(processes=cpu_count) as pool:
+        pool.map(self_play, range(cpu_count))
 
 
