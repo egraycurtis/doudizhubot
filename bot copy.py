@@ -131,54 +131,34 @@ def run_background_process():
             cards_person_on_left_has_left_tensor = cards_left_tensor(cards_person_on_left_has_played_dict, (position - 1)%3)
             cards_person_on_right_has_left_tensor = cards_left_tensor(cards_person_on_right_has_played_dict, (position + 1)%3)
             print()
-            print()
-            print(to_string(cards_in_hand))
+            print(position)
             print()
             model = models[position]
             choice = options[0]
             max_expected_value = -1
-            feature_tensors_list = [[] for _ in range(10)]  
-            all_cards_remaining_dicts = []
             for option_dict in options:
                 cards_that_would_be_remaining_dict = remove_move_from_hand_copy(cards_in_hand, option_dict)
-                all_cards_remaining_dicts.append(cards_that_would_be_remaining_dict)
 
-                feature_tensors = [
-                    additional_features_tensor(cards_not_seen_dict).reshape(85),
-                    additional_features_tensor(cards_that_would_be_remaining_dict).reshape(85),
-                    dict_to_tensor(cards_not_seen_dict).reshape(54),
-                    dict_to_tensor(cards_person_on_right_has_played_dict).reshape(54),
-                    dict_to_tensor(cards_person_on_left_has_played_dict).reshape(54),
-                    dict_to_tensor(option_dict).reshape(54),
-                    dict_to_tensor(cards_that_would_be_remaining_dict).reshape(54),
-                    last_played_tensor.reshape(2),
-                    cards_person_on_left_has_left_tensor.reshape(5),
-                    cards_person_on_right_has_left_tensor.reshape(5),
-                ]
+                prediction = model.predict([
+                    additional_features_tensor(cards_not_seen_dict),
+                    additional_features_tensor(cards_that_would_be_remaining_dict),
+                    dict_to_tensor(cards_not_seen_dict),
+                    dict_to_tensor(cards_person_on_right_has_played_dict),
+                    dict_to_tensor(cards_person_on_left_has_played_dict),
+                    dict_to_tensor(option_dict),
+                    dict_to_tensor(cards_that_would_be_remaining_dict),
+                    last_played_tensor,
+                    cards_person_on_left_has_left_tensor,
+                    cards_person_on_right_has_left_tensor,
+                ], verbose=0)
 
-                for i, tensor in enumerate(feature_tensors):
-                    feature_tensors_list[i].append(tensor)
-
-            model_input_tensors = [np.array(feature_list) for feature_list in feature_tensors_list]
-            predictions = model.predict(model_input_tensors, verbose=0)
-
-            if predictions.ndim > 1:
-                predictions = predictions.flatten()
-
-            options_to_print = []
-            for i, option_dict in enumerate(options):
-                prediction = predictions[i]
-                exp_val = expected_value(prediction, option_dict, all_cards_remaining_dicts[i])
-                options_to_print.append((prediction, option_dict, exp_val))
-
+                probability_of_winning = prediction[0][0]
+                exp_val = expected_value(probability_of_winning, option_dict, cards_that_would_be_remaining_dict)
+                print(to_string(option_dict), probability_of_winning, exp_val)
                 if exp_val > max_expected_value:
                     max_expected_value = exp_val
                     choice = option_dict
-            
-            options_to_print.sort(key=lambda x: x[0], reverse=True)
-            for prediction, option_dict, exp_val in options_to_print:
-                print(f"p: {prediction:.4f}, ev: {exp_val:.4f} - {to_string(option_dict)}")
-
+                
             ids = get_card_ids(cards_in_hand_ids, choice)
             session.execute(text("""
                 update predictions
@@ -186,5 +166,6 @@ def run_background_process():
                 where id = :id
             """), {'args': json.dumps({ 'selected_cards': ids }), 'id': req.id})
             session.commit()
+            print(ids)
 
 run_background_process()

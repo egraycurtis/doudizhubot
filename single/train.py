@@ -222,12 +222,12 @@ def train():
         else:
             if show_output: print('options:')
             
-        all_cards_remaining_dict = []
+        all_cards_remaining_dicts = []
         feature_tensors_list = [[] for _ in range(8)]  
 
         for option_dict in options:
             cards_that_would_be_remaining_dict = remove_move_from_hand_copy(hand, option_dict)
-            all_cards_remaining_dict.append(cards_that_would_be_remaining_dict)
+            all_cards_remaining_dicts.append(cards_that_would_be_remaining_dict)
 
             feature_tensors = [
                 cards_not_seen_additional_features_tensor.reshape(85),
@@ -243,15 +243,12 @@ def train():
             for i, tensor in enumerate(feature_tensors):
                 feature_tensors_list[i].append(tensor)
 
-        # Prepare the input tensors for the model
         model_input_tensors = [np.array(feature_list) for feature_list in feature_tensors_list]
-
         predictions = model.predict(model_input_tensors, verbose=0)
 
         if predictions.ndim > 1:
             predictions = predictions.flatten()
 
-        # Iterate over each option and its prediction
         for i, option_dict in enumerate(options):
             prediction = predictions[i]
             if show_output:
@@ -259,7 +256,7 @@ def train():
 
         max_prediction_index = np.argmax(predictions)
         choice_dict = options[max_prediction_index]
-        cards_remaining_dict = all_cards_remaining_dict[max_prediction_index]
+        cards_remaining_dict = all_cards_remaining_dicts[max_prediction_index]
         max_prediction = predictions[max_prediction_index]
 
         for card, count in choice_dict.items():

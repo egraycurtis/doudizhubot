@@ -1,14 +1,10 @@
-import random
 import numpy as np
 from self_play import cards_left_tensor, create_last_played_tensor
 import tensorflow as tf
 from filtered_options import filtered_options
 from action_space import action_space
-from single.train import create_position_tensor
 from turn_info import get_turn_info
 from cards import empty_card_dict, full_card_dict, landlord_first_shuffle, rank
-import json
-import time
 
 def evaluate():
     model1 = [
@@ -32,7 +28,7 @@ def evaluate():
     models = [model1, model2, model3]
     model_wins = [0, 0, 0]
     for landlord_offset in range(3):
-        game_batch_size = 100
+        game_batch_size = 1000
         game_states = [{
             'complete': False,
             'number': i,
