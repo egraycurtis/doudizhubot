@@ -16,10 +16,11 @@ def create_model():
     i10 = Input(shape=(5))
     merged = layers.concatenate([i1, i2, i3, i4, i5, i6, i7, i8, i9, i10])
 
-    dense1 = layers.Dense(256, activation='relu')(merged)
-    dense2 = layers.Dense(128, activation='relu')(dense1)
-    dense3 = layers.Dense(64, activation='relu')(dense2)
-    output = layers.Dense(1, activation='sigmoid')(dense3)
+    dense1 = layers.Dense(512, activation='relu')(merged)
+    dense2 = layers.Dense(256, activation='relu')(dense1)
+    dense3 = layers.Dense(128, activation='relu')(dense2)
+    dense4 = layers.Dense(64, activation='relu')(dense3)
+    output = layers.Dense(1, activation='sigmoid')(dense4)
 
     model = models.Model(inputs=[i1, i2, i3, i4, i5, i6, i7, i8, i9, i10], outputs=output)
     model.compile(optimizer='adam', loss='mean_squared_error', metrics=['mae'])

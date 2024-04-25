@@ -38,7 +38,6 @@ def shuffle():
     middle_cards_taken = False
     for hand in hands[:2]:
         if has_three_trumps(hand):
-            print()
             middle_cards_taken = True
             for card in card_list[51:54]:
                 hand[card] += 1

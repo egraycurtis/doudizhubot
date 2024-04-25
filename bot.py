@@ -1,7 +1,7 @@
 import time
 from self_play import create_last_played_tensor
 from cards import empty_card_dict, empty_card_id_dict, mapped_values
-from single.train import dict_to_tensor, get_move_options, create_position_tensor, remove_move_from_hand_copy, additional_features_tensor, to_string
+from self_play import dict_to_tensor, get_move_options, remove_move_from_hand_copy, additional_features_tensor, to_string
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import create_engine, text
 import tensorflow as tf
@@ -48,10 +48,7 @@ def run_background_process():
     engine = create_engine(db_url)
     Session = sessionmaker(bind=engine)
     session = Session()
-    p0 = tf.keras.models.load_model('deeper0.keras')
-    p1 = tf.keras.models.load_model('deeper1.keras')
-    p2 = tf.keras.models.load_model('deeper2.keras')
-    models = [p0, p1, p2]
+    models = [tf.keras.models.load_model(f"./models/deep/deep{position}.keras") for position in range(3)]
     while True:
         time.sleep(1)
         requested_predictions = session.execute(text("""
@@ -187,4 +184,5 @@ def run_background_process():
             """), {'args': json.dumps({ 'selected_cards': ids }), 'id': req.id})
             session.commit()
 
-run_background_process()
+if __name__ == "__main__":
+    run_background_process()
