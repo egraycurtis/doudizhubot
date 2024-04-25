@@ -1,5 +1,6 @@
 import random
 import numpy as np
+from self_play import create_transformer_input
 import tensorflow as tf
 from filtered_options import filtered_options
 from action_space import action_space
@@ -13,9 +14,10 @@ import redis
 def transfer(partition):
     while True:
         try:
-            p0 = tf.keras.models.load_model('deeper0.keras')
-            p1 = tf.keras.models.load_model('deeper1.keras')
-            p2 = tf.keras.models.load_model('deeper2.keras')
+            p0 = tf.keras.models.load_model('./models/deep/deep0.keras')
+            p1 = tf.keras.models.load_model('./models/deep/deep1.keras')
+            p2 = tf.keras.models.load_model('./models/deep/deep2.keras')
+            model_name = "transformer"
             models = [p0, p1, p2]
             game_batch_size = 10
             game_states = [{
@@ -29,13 +31,15 @@ def transfer(partition):
                 'landlord_won': False,
                 } for i in range(game_batch_size)]
             
-            transfer_predictions = []
+            training_data = []
             for turn_number in range(200):
                 position = turn_number%3
                 options_across_games = []
                 tensors_across_games = []
                 option_game_number = []
+
                 feature_tensors_list = [[] for _ in range(10)]
+
                 all_games_complete = True
                 for game in game_states:
                     if game['complete'] == True:
@@ -72,6 +76,10 @@ def transfer(partition):
                     cards_person_on_left_has_left_tensor = cards_left_tensor(game['cards_played_by_hands'], (position - 1)%3)
                     cards_person_on_right_has_left_tensor = cards_left_tensor(game['cards_played_by_hands'], (position + 1)%3)
 
+                    transformer_tensor = np.zeros((15, 54), dtype=np.float32)
+                    if model_name == 'transformer':
+                        transformer_tensor = create_transformer_input(game['turns'])
+
                     for option_dict in options:
                         options_across_games.append(option_dict)
                         option_game_number.append(game['number'])
@@ -101,6 +109,7 @@ def transfer(partition):
                             'last_played_tensor': last_played_tensor,
                             'cards_person_on_left_has_left_tensor': cards_person_on_left_has_left_tensor,
                             'cards_person_on_right_has_left_tensor': cards_person_on_right_has_left_tensor,
+                            'transformer_tensor': transformer_tensor,
                         })
 
                         for i, tensor in enumerate(feature_tensors):
@@ -122,7 +131,7 @@ def transfer(partition):
                 for i, option_dict in enumerate(options_across_games):
                     prediction = predictions[i]
                     game_number = option_game_number[i]
-                    transfer_predictions.append({'prediction': prediction, 'tensors': tensors_across_games[i], 'position': position})
+                    training_data.append({'prediction': prediction, 'tensors': tensors_across_games[i], 'position': position})
 
                     if game_number == 0 and partition == 0:
                         options_to_print.append((prediction, option_dict))
@@ -156,16 +165,7 @@ def transfer(partition):
                         'turn_info': turn_info,
                         'prediction': choice['max_prediction'],
                         'position': position,
-                        'cards_not_seen_additional_features_tensor': choice['tensors']['cards_not_seen_additional_features_tensor'],
-                        'cards_remaining_additional_feature_tensor': choice['tensors']['cards_remaining_additional_feature_tensor'],
-                        'cards_not_seen_tensor': choice['tensors']['cards_not_seen_tensor'],
-                        'cards_person_on_right_has_played_tensor': choice['tensors']['cards_person_on_right_has_played_tensor'],
-                        'cards_person_on_left_has_played_tensor': choice['tensors']['cards_person_on_left_has_played_tensor'],
-                        'choice_tensor': choice['tensors']['choice_tensor'],
-                        'cards_remaining_tensor': choice['tensors']['cards_remaining_tensor'],
-                        'last_played_tensor': choice['tensors']['last_played_tensor'],
-                        'cards_person_on_left_has_left_tensor': choice['tensors']['cards_person_on_left_has_left_tensor'],
-                        'cards_person_on_right_has_left_tensor': choice['tensors']['cards_person_on_right_has_left_tensor'],
+                        'tensors':  choice['tensors'],
                     })
                     remove_choice_from_hand(hand, choice_dict)
                     if card_count(hand) == 0:
@@ -174,12 +174,17 @@ def transfer(partition):
                             game['landlord_won'] = True
 
             r = redis.Redis(host='localhost', port=6379, db=0)
-            turn_data_json = json.dumps(transfer_predictions, cls=NumpyEncoder)        
-            r.rpush('transfer_data', turn_data_json)
+            turn_data_json = json.dumps({'turns': training_data, 'model_name': model_name}, cls=NumpyEncoder)  
+            count = r.llen('training_data')
+            if count < 25:      
+                r.rpush('training_data', turn_data_json)
+
 
             # end_time = time.perf_counter()
             # time_delta = end_time - start_time
-        except: pass
+        except Exception as e:
+            print(e)
+            pass
 
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):

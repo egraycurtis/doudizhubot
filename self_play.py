@@ -6,18 +6,14 @@ from action_space import action_space
 from turn_info import get_turn_info
 from cards import empty_card_dict, full_card_dict, landlord_first_shuffle, rank
 import json
-import psycopg2
+import redis
 import multiprocessing
 
-def self_play(partition):
+def self_play(partition: int, model_name: str):
     while True:
         try:
-            p0 = tf.keras.models.load_model('deeper0.keras')
-            p1 = tf.keras.models.load_model('deeper1.keras')
-            p2 = tf.keras.models.load_model('deeper2.keras')
-            models = [p0, p1, p2]
+            models = [tf.keras.models.load_model(f"./models/{model_name}/{model_name}{position}.keras") for position in range(3)]
             learning_rate = .1
-            # start_time = time.perf_counter()
             game_batch_size = 50
             game_states = [{
                 'complete': False,
@@ -36,7 +32,11 @@ def self_play(partition):
                 options_across_games = []
                 tensors_across_games = []
                 option_game_number = []
+
                 feature_tensors_list = [[] for _ in range(10)]
+                if model_name == 'transformer' or model_name == 'lstm':
+                    feature_tensors_list = [[] for _ in range(11)]
+
                 all_games_complete = True
                 for game in game_states:
                     if game['complete'] == True:
@@ -56,17 +56,17 @@ def self_play(partition):
                     cards_not_seen_tensor = dict_to_tensor(cards_not_seen_dict)
                     cards_not_seen_additional_features_tensor = additional_features_tensor(cards_not_seen_dict)
 
-                    if game['show_output']: 
-                        print()
-                        if position == 0:  print('L')
-                        print(to_string(hand))
+                    # if game['show_output']: 
+                    #     print()
+                    #     if position == 0:  print('L')
+                    #     print(to_string(hand))
 
                     if random.random() < 0.2:
                         choice_dict = random.choice(options)
                         options = [choice_dict]
-                        if game['show_output']: print('random choice')
-                    else:
-                        if game['show_output']: print('options:')
+                        # if game['show_output']: print('random choice')
+                    # else:
+                        # if game['show_output']: print('options:')
                         
                     last_played_tensor = create_last_played_tensor(0)
                     if len(game['turns']) > 0:
@@ -77,6 +77,10 @@ def self_play(partition):
 
                     cards_person_on_left_has_left_tensor = cards_left_tensor(game['cards_played_by_hands'], (position - 1)%3)
                     cards_person_on_right_has_left_tensor = cards_left_tensor(game['cards_played_by_hands'], (position + 1)%3)
+
+                    transformer_tensor = np.zeros((15, 54), dtype=np.float32)
+                    if model_name == 'transformer' or model_name == 'lstm':
+                        transformer_tensor = create_transformer_input(game['turns'])
 
                     for option_dict in options:
                         options_across_games.append(option_dict)
@@ -96,6 +100,9 @@ def self_play(partition):
                             cards_person_on_right_has_left_tensor.reshape(5),
                         ]
 
+                        if model_name == 'transformer' or model_name == 'lstm':
+                            feature_tensors.append(transformer_tensor)
+
                         tensors_across_games.append({
                             'cards_not_seen_additional_features_tensor': cards_not_seen_additional_features_tensor,
                             'cards_remaining_additional_feature_tensor': additional_features_tensor(cards_that_would_be_remaining_dict),
@@ -107,6 +114,7 @@ def self_play(partition):
                             'last_played_tensor': last_played_tensor,
                             'cards_person_on_left_has_left_tensor': cards_person_on_left_has_left_tensor,
                             'cards_person_on_right_has_left_tensor': cards_person_on_right_has_left_tensor,
+                            'transformer_tensor': transformer_tensor,
                         })
 
                         for i, tensor in enumerate(feature_tensors):
@@ -137,9 +145,9 @@ def self_play(partition):
                         choices[game_number]['tensors'] = tensors_across_games[i]
                         choices[game_number]['option_dict'] = option_dict
 
-                options_to_print.sort(key=lambda x: x[0], reverse=True)
-                for prediction, option_dict in options_to_print:
-                    print(f"{prediction:.5f} - {to_string(option_dict)}")
+                # options_to_print.sort(key=lambda x: x[0], reverse=True)
+                # for prediction, option_dict in options_to_print:
+                #     print(f"{prediction:.5f} - {to_string(option_dict)}")
 
                 # print('update game states')
                 for game in game_states:
@@ -154,24 +162,14 @@ def self_play(partition):
                         game['cards_seen'][card] += count
                         game['cards_played_by_hands'][position][card] += count
                 
-                    if game['show_output']: print('choice:', to_string(choice_dict))
+                    # if game['show_output']: print('choice:', to_string(choice_dict))
 
                     turn_info = get_turn_info(choice_dict)
                     game['turns'].append({ 
                         'turn_info': turn_info,
                         'prediction': choice['max_prediction'],
-                        'error': 0,
                         'position': position,
-                        'cards_not_seen_additional_features_tensor': choice['tensors']['cards_not_seen_additional_features_tensor'],
-                        'cards_remaining_additional_feature_tensor': choice['tensors']['cards_remaining_additional_feature_tensor'],
-                        'cards_not_seen_tensor': choice['tensors']['cards_not_seen_tensor'],
-                        'cards_person_on_right_has_played_tensor': choice['tensors']['cards_person_on_right_has_played_tensor'],
-                        'cards_person_on_left_has_played_tensor': choice['tensors']['cards_person_on_left_has_played_tensor'],
-                        'choice_tensor': choice['tensors']['choice_tensor'],
-                        'cards_remaining_tensor': choice['tensors']['cards_remaining_tensor'],
-                        'last_played_tensor': choice['tensors']['last_played_tensor'],
-                        'cards_person_on_left_has_left_tensor': choice['tensors']['cards_person_on_left_has_left_tensor'],
-                        'cards_person_on_right_has_left_tensor': choice['tensors']['cards_person_on_right_has_left_tensor'],
+                        'tensors':  choice['tensors'],
                     })
                     remove_choice_from_hand(hand, choice_dict)
                     if card_count(hand) == 0:
@@ -179,31 +177,30 @@ def self_play(partition):
                         if position == 0:
                             game['landlord_won'] = True
 
-            turns_by_position = [[],[],[]]
+            training_data = {'turns': [], 'model_name': model_name}
             for game in game_states:
                 for turn in game['turns']:
                     if (turn['position'] == 0) == game['landlord_won']:
-                        turn['error'] = (1 - turn['prediction'])**2
                         turn['prediction'] += learning_rate * (1 - turn['prediction'])
                     else:
-                        turn['error'] = turn['prediction']**2
                         turn['prediction'] -= learning_rate * turn['prediction']
-                    turns_by_position[turn['position']].append(turn)
+                    training_data['turns'].append({'prediction': turn['prediction'], 'tensors': turn['tensors'], 'position': turn['position']})
 
-            conn = psycopg2.connect("postgresql://postgres:password@localhost:5432")
-            cursor = conn.cursor()
-            turn_data_json = json.dumps({'turns_by_position': turns_by_position}, cls=NumpyEncoder)
-            
-            cursor.execute('''
-                insert into game_turns (turn_data)
-                values (%s)
-            ''', (turn_data_json,))
-            conn.commit()
-            conn.close()
 
-            # end_time = time.perf_counter()
-            # time_delta = end_time - start_time
-        except: pass
+            r = redis.Redis(host='localhost', port=6379, db=0)
+            training_data_json = json.dumps(training_data, cls=NumpyEncoder)        
+            r.rpush('training_data', training_data_json)
+
+        except Exception as e:
+            print(e)
+            pass
+
+def create_transformer_input(turns):
+    transformer_input = np.zeros((15, 54), dtype=np.float32)
+    for i in range(min(len(turns), 15)):
+        transformer_input[i, :] = np.array(turns[-(i+1)]['tensors']['choice_tensor'])
+    
+    return transformer_input
 
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -380,9 +377,12 @@ def to_string(card_dict: dict[str, int]):
         return 'pass'
     return ''.join(sorted(s, key=rank))
 
+
+
+
 if __name__ == "__main__":
+    models = ['transformer']
     cpu_count = multiprocessing.cpu_count()
+    tasks = [(i, models[i%len(models)]) for i in range(cpu_count - 2)]
     with multiprocessing.Pool(processes=cpu_count) as pool:
-        pool.map(self_play, range(cpu_count))
-
-
+        pool.starmap(self_play, tasks)
