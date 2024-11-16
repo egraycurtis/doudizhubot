@@ -109,7 +109,7 @@ def expected_value(win_probability: float, option_dict: dict[str, int], cards_re
     if (option_dict['B'] + option_dict['R'] == 2 and total_count == 2 ) or (has_four_of_a_kind and total_count == 4):
         option_multiplier = 2
 
-    return remaining_cards_multiplier * option_multiplier * (win_probability - .5)
+    return remaining_cards_multiplier * option_multiplier * 2 * (win_probability - .5)
 
 def choice_bomb_multiplier(card_dict: dict[str, int]) -> int:
     if card_dict['B'] + card_dict['R'] == 2:

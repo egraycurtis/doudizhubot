@@ -1,6 +1,6 @@
 import time
 from self_play import create_last_played_tensor
-from cards import empty_card_dict, empty_card_id_dict, mapped_values
+from cards import empty_card_dict, empty_card_id_dict, mapped_values, rank
 from self_play import dict_to_tensor, get_move_options, remove_move_from_hand_copy, additional_features_tensor, to_string
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import create_engine, text
@@ -42,13 +42,23 @@ def cards_left_tensor(cards_played_by_hand: dict[str, int], position: int):
     if cards_left < 6: tensor[cards_left-1] = 1
     return np.expand_dims(tensor, axis=0)
 
+def create_previous_turns_tensor(card_dicts: list[dict[str, int]]):
+    tensor = np.zeros((15, 54))
+    for i in range(15):
+        card_dict = card_dicts[i]
+        for card, count in card_dict.items():
+            for j in range(count):
+                tensor[i, min(4*rank(card) + j, 53)] = 1
+
+    return np.expand_dims(tensor, axis=0)
+
 def run_background_process():
-    # db_url = os.getenv('DATABASE_URL', "postgresql://postgres:password@localhost:5432/ddz")
-    db_url = 'postgresql://dpawcqez:bgMMRQdd4FS4-kCRcDiCjg48rUi5yqd3@castor.db.elephantsql.com/dpawcqez'
+    db_url = os.getenv('DATABASE_URL', "postgresql://postgres:password@localhost:5432/ddz")
+    # db_url = 'postgresql://dpawcqez:bgMMRQdd4FS4-kCRcDiCjg48rUi5yqd3@castor.db.elephantsql.com/dpawcqez'
     engine = create_engine(db_url)
     Session = sessionmaker(bind=engine)
     session = Session()
-    models = [tf.keras.models.load_model(f"./models/deep/deep{position}.keras") for position in range(3)]
+    models = [tf.keras.models.load_model(f"./models/transformer/transformer{position}.keras") for position in range(3)]
     while True:
         time.sleep(1)
         requested_predictions = session.execute(text("""
@@ -78,9 +88,8 @@ def run_background_process():
             cards_in_hand = empty_card_dict()
             cards_not_seen_dict = empty_card_dict()
             cards_in_hand_ids = empty_card_id_dict()
-            previous_turn_dict = empty_card_dict()
-            penultimate_turn_dict = empty_card_dict()
             landlord_offset = 0
+            previous_turns = [empty_card_dict() for _ in range(15)]
             for card in cards:
                 if req.landlord_hand_id == card.hand_id:
                     landlord_offset = card.hand_position
@@ -91,10 +100,8 @@ def run_background_process():
                     if (req.turn_number + 1) % 3 == card.hand_position:
                         cards_person_on_right_has_played_dict[mapped_values(card.value)] += 1 
                     
-                    if (req.turn_number - 1) == card.turn_id:
-                        previous_turn_dict[mapped_values(card.value)] += 1
-                    if (req.turn_number - 2) == card.turn_id:
-                        penultimate_turn_dict[mapped_values(card.value)] += 1
+                    if card.turn_number >= req.turn_number - 15:
+                        previous_turns[req.turn_number - card.turn_number - 1][mapped_values(card.value)] += 1
 
                 if card.turn_id == None:
                     if card.hand_position == req.turn_number % 3:
@@ -103,8 +110,7 @@ def run_background_process():
                     else:
                         cards_not_seen_dict[mapped_values(card.value)] += 1
 
-
-
+            previous_turns_tensor = create_previous_turns_tensor(previous_turns)
 
             raw_sql = text(f"""
                 select 
@@ -128,13 +134,11 @@ def run_background_process():
             cards_person_on_left_has_left_tensor = cards_left_tensor(cards_person_on_left_has_played_dict, (position - 1)%3)
             cards_person_on_right_has_left_tensor = cards_left_tensor(cards_person_on_right_has_played_dict, (position + 1)%3)
             print()
-            print()
-            print(to_string(cards_in_hand))
-            print()
+            print(f"pos: {position} cards:{to_string(cards_in_hand)}")
             model = models[position]
             choice = options[0]
             max_expected_value = -1
-            feature_tensors_list = [[] for _ in range(10)]  
+            feature_tensors_list = [[] for _ in range(11)]  
             all_cards_remaining_dicts = []
             for option_dict in options:
                 cards_that_would_be_remaining_dict = remove_move_from_hand_copy(cards_in_hand, option_dict)
@@ -151,6 +155,7 @@ def run_background_process():
                     last_played_tensor.reshape(2),
                     cards_person_on_left_has_left_tensor.reshape(5),
                     cards_person_on_right_has_left_tensor.reshape(5),
+                    previous_turns_tensor.reshape(15, 54),
                 ]
 
                 for i, tensor in enumerate(feature_tensors):
