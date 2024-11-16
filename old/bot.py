@@ -109,7 +109,6 @@ def run_background_process():
 
                 probability_of_winning = prediction[0][0]
                 exp_val = expected_value(probability_of_winning, option_dict, cards_that_would_be_remaining_dict)
-                print(to_string(option_dict), probability_of_winning, exp_val)
                 if exp_val > max_expected_value:
                     max_expected_value = exp_val
                     choice = option_dict
@@ -121,6 +120,5 @@ def run_background_process():
                 where id = :id
             """), {'args': json.dumps({ 'selected_cards': ids }), 'id': req.id})
             session.commit()
-            print(ids)
 
 run_background_process()

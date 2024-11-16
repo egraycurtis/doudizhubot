@@ -199,7 +199,6 @@ def gulag():
                 game['landlord_position'] = i
     
     for turn_number in range(200):
-        print(turn_number)
         position = turn_number%3
         options_across_games = []
         tensors_across_games = []
