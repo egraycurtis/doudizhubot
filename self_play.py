@@ -39,7 +39,7 @@ def self_play(partition: int, model_name: str):
 
                 all_games_complete = True
                 for game in game_states:
-                    if game['complete'] == True:
+                    if game['complete']:
                         continue
 
                     all_games_complete = False
@@ -151,7 +151,7 @@ def self_play(partition: int, model_name: str):
 
                 # print('update game states')
                 for game in game_states:
-                    if game['complete'] == True:
+                    if game['complete']:
                         continue
 
                     choice = choices[game['number']]
@@ -211,32 +211,27 @@ class NumpyEncoder(json.JSONEncoder):
         return json.JSONEncoder.default(self, obj)
     
 def get_previous_turn_info(turns):
-    if len(turns) > 0:
-        if turns[-1]['turn_info']['type'] != 'pass':
+    if len(turns) > 0 and turns[-1]['turn_info']['type'] != 'pass':
             return turns[-1]['turn_info']
-    if len(turns) > 1:
-        if turns[-2]['turn_info']['type'] != 'pass':
+            
+    if len(turns) > 1 and turns[-2]['turn_info']['type'] != 'pass':
             return turns[-2]['turn_info']
+            
     return {'type': 'pass', 'size': 0, 'rank': 0}
 
 def get_previous_played(turns):
-    if len(turns) > 0:
-        if turns[-1]['turn_info']['type'] != 'pass':
+    if len(turns) > 0 and turns[-1]['turn_info']['type'] != 'pass':
             return -1
-    if len(turns) > 1:
-        if turns[-2]['turn_info']['type'] != 'pass':
+    
+    if len(turns) > 1 and turns[-2]['turn_info']['type'] != 'pass':
             return -2
+    
     return 0
 
 def can_make_move(move: str, cards_in_hand: dict[str, int]):
-    move_frequency = empty_card_dict()
-    for char in move:
-        move_frequency[char] += 1
+    move_frequency = string_to_card_dict(move)
+    return all(cards_in_hand[c] >= n for c, n in move_frequency.items())
 
-    for card, count in move_frequency.items():
-        if cards_in_hand[card] < count:
-            return False
-    return True
 
 def string_to_card_dict(action: str):
     d = empty_card_dict()
@@ -258,7 +253,8 @@ def get_move_options(info, hand: dict[str, int]) -> list[dict[str, int]]:
             for _, sizeToMoves in filtered_options['bomb'].items():
                 for _, values in sizeToMoves.items():
                     actions.extend(values)
-        if 'BR' not in actions: actions.append('BR')
+        if 'BR' not in actions:
+            actions.append('BR')
         actions.append('')
 
     for a in actions:
@@ -285,97 +281,56 @@ def remove_move_from_hand_copy(hand: dict[str, int], move: dict[str, int]):
         hand_copy[card] -= count
     return hand_copy
 
-def dict_to_tensor(card_dict: dict[str, int]):
-    tensor = np.zeros(54)
+def dict_to_tensor(card_dict: dict[str, int]) -> np.ndarray:
+    tensor = np.zeros(54, dtype=float)
     for card, count in card_dict.items():
-        for i in range(count):
-            tensor[min(4*rank(card) + i, 53)] = 1
+        idx = 4 * rank(card)
+        tensor[idx : idx + min(count, 4)] = 1
+    return tensor[None, :] 
 
-    return np.expand_dims(tensor, axis=0)
+def create_last_played_tensor(offset: int) -> np.ndarray:
+    return np.eye(3, 2, k=offset + 1, dtype=float)[0][None, :]
 
-def create_last_played_tensor(i: int):
-    tensor = np.zeros(2)
-    if i > 0: tensor[i-1] = 1
-    return np.expand_dims(tensor, axis=0)
+def additional_features_tensor(card_dict: dict[str, int]) -> np.ndarray:
+    cards = "3456789TJQKA"
+    features: list[int] = []
 
-def additional_features_tensor(card_dict: dict[str, int]):
-    cards = '3456789TJQKA'
-    l = []
-    for i in range(len(cards)): # 36 straights
-        still_going = True
-        for j in range(i, len(cards)):
-            if card_dict[cards[j]] == 1:
-                still_going = False
-            if j - i >= 4:
-                if still_going == True:
-                    l.append(1)
-                else:
-                    l.append(0)
+    for length in range(5, len(cards) + 1):
+        for start in range(len(cards) - length + 1):
+            window = cards[start : start + length]
+            features.append(int(all(card_dict[c] >= 1 for c in window)))
 
-    for i in range(len(cards)): # 27 pair straights ignoring len > 5
-        still_going = True
-        for j in range(i, len(cards)):
-            if j - i > 4:
-                break
-            if card_dict[cards[j]] < 2:
-                still_going = False
-            if j - i >= 2:
-                if still_going == True:
-                    l.append(1)
-                else:
-                    l.append(0)
-    
-    for i in range(len(cards)): # 21 triple straights ignoring len > 3
-        still_going = True
-        for j in range(i, len(cards)):
-            if j - i > 2:
-                break
-            if card_dict[cards[j]] < 3:
-                still_going = False
-            if j - i >= 1:
-                if still_going == True:
-                    l.append(1)
-                else:
-                    l.append(0)
-    
-    if card_dict['B'] + card_dict['R'] == 2:
-        l.append(1)
-    else:
-        l.append(0)
+    for length in range(3, 6):
+        for start in range(len(cards) - length + 1):
+            window = cards[start : start + length]
+            features.append(int(all(card_dict[c] >= 2 for c in window)))
 
-    tensor = np.zeros(85)
-    for i in range(len(l)):
-        tensor[i] = l[i]
-    return np.expand_dims(tensor, axis=0)
+    for length in range(2, 4):
+        for start in range(len(cards) - length + 1):
+            window = cards[start : start + length]
+            features.append(int(all(card_dict[c] >= 3 for c in window)))
 
-def card_count(card_dict: dict[str, int]):
-    count = 0
-    for _, c in card_dict.items():
-        count += c
-    return count
 
-def cards_left_tensor(cards_played_by_hands: list[dict[str, int]], position: int):
-    card_dict = cards_played_by_hands[position]
+    features.append(int(card_dict.get("B", 0) + card_dict.get("R", 0) == 2))
 
-    cards_left = 17
-    if position == 0:
-        cards_left = 20
+    return np.array(features, dtype=float)[None, :]
 
-    for _, c in card_dict.items():
-        cards_left -= c
-    
-    tensor = np.zeros(5)
-    if cards_left < 6: tensor[cards_left-1] = 1
-    return np.expand_dims(tensor, axis=0)
 
-def to_string(card_dict: dict[str, int]):
-    s = ''
-    for card, c in card_dict.items():
-        for _ in range(c):
-            s += card
-    if s == '': 
-        return 'pass'
-    return ''.join(sorted(s, key=rank))
+def card_count(card_dict: dict[str, int]) -> int:
+    return sum(card_dict.values())
+
+
+def cards_left_tensor(played_by_hands: list[dict[str, int]], pos: int) -> np.ndarray:
+    remaining = (20 if pos == 0 else 17) - card_count(played_by_hands[pos])
+    tensor = np.zeros(5, dtype=float)
+    if 1 <= remaining <= 5:
+        tensor[remaining - 1] = 1
+
+    return tensor[None, :]
+
+def to_string(card_dict: dict[str, int]) -> str:
+    s = "".join(card * n for card, n in card_dict.items() for n in range(card_dict[card]))
+    return "pass" if not s else "".join(sorted(s, key=rank))
 
 
 

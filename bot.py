@@ -1,5 +1,5 @@
 import time
-from self_play import create_last_played_tensor
+from self_play import cards_left_tensor, create_last_played_tensor, get_previous_turn_info
 from cards import empty_card_dict, empty_card_id_dict, mapped_values, rank
 from self_play import dict_to_tensor, get_move_options, remove_move_from_hand_copy, additional_features_tensor, to_string
 from sqlalchemy.orm import sessionmaker
@@ -10,14 +10,6 @@ import json
 import numpy as np
 from turn_info import expected_value
 
-def get_previous_turn_info(turns):
-    if len(turns) > 0:
-        if turns[0].type != 'pass':
-            return {'type': turns[0].type, 'size': turns[0].size, 'rank': turns[0].rank}
-    if len(turns) > 1:
-        if turns[1].type != 'pass':
-            return {'type': turns[1].type, 'size': turns[1].size, 'rank': turns[1].rank}
-    return {'type': 'pass', 'size': 0, 'rank': 0}
 
 def get_card_ids(card_dict: dict[str, list], choice: dict[str, int]):
     result_ids = []
@@ -29,18 +21,6 @@ def get_card_ids(card_dict: dict[str, list], choice: dict[str, int]):
 
     return result_ids
 
-def cards_left_tensor(cards_played_by_hand: dict[str, int], position: int):
-
-    cards_left = 17
-    if position == 0:
-        cards_left = 20
-
-    for _, c in cards_played_by_hand.items():
-        cards_left -= c
-    
-    tensor = np.zeros(5)
-    if cards_left < 6: tensor[cards_left-1] = 1
-    return np.expand_dims(tensor, axis=0)
 
 def create_previous_turns_tensor(card_dicts: list[dict[str, int]]):
     tensor = np.zeros((15, 54))
@@ -94,7 +74,7 @@ def run_background_process():
                 if req.landlord_hand_id == card.hand_id:
                     landlord_offset = card.hand_position
 
-                if card.turn_id != None:
+                if card.turn_id is not None:
                     if (req.turn_number - 1) % 3 == card.hand_position:
                         cards_person_on_left_has_played_dict[mapped_values(card.value)] += 1
                     if (req.turn_number + 1) % 3 == card.hand_position:
@@ -103,7 +83,7 @@ def run_background_process():
                     if card.turn_number >= req.turn_number - 15:
                         previous_turns[req.turn_number - card.turn_number - 1][mapped_values(card.value)] += 1
 
-                if card.turn_id == None:
+                if card.turn_id is None:
                     if card.hand_position == req.turn_number % 3:
                         cards_in_hand[mapped_values(card.value)] += 1
                         cards_in_hand_ids[mapped_values(card.value)].append(card.id)

@@ -11,7 +11,7 @@ def setup_database():
     #     )
     # ''')
     cursor.execute('''
-        create table competitions (
+        create table if not exists competitions (
             id bigint generated always as identity primary key,
             created_at timestamptz not null default now(),
             results jsonb
@@ -19,5 +19,3 @@ def setup_database():
     ''')
     conn.commit()
     conn.close()
-    
-setup_database()

@@ -174,5 +174,6 @@ def get_turn_info(card_dict: dict[str, int]):
             info['type'] = 'bomb_with_discards'
             info['rank'] = bomb_with_discards_rank(cards)
 
-    if info['type'] == 'illegal': print(card_dict)
+    if info['type'] == 'illegal':
+        print(card_dict)
     return info

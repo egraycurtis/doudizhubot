@@ -1,11 +1,9 @@
 import json
 import numpy as np
-from self_play import cards_left_tensor, create_last_played_tensor, create_transformer_input
+from self_play import additional_features_tensor, card_count, cards_left_tensor, cards_not_seen, create_last_played_tensor, create_transformer_input, dict_to_tensor, get_move_options, get_previous_turn_info, remove_choice_from_hand, remove_move_from_hand_copy
 import tensorflow as tf
-from filtered_options import filtered_options
-from action_space import action_space
 from turn_info import get_turn_info
-from cards import empty_card_dict, full_card_dict, landlord_first_shuffle, rank
+from cards import empty_card_dict, landlord_first_shuffle
 import psycopg2
 
 
@@ -47,7 +45,7 @@ def compete(model_names: list[str]):
 
                     all_games_complete = True
                     for game in game_states:
-                        if game['complete'] == True:
+                        if game['complete']:
                             continue
 
                         all_games_complete = False
@@ -141,7 +139,7 @@ def compete(model_names: list[str]):
 
                     # print('update game states')
                     for game in game_states:
-                        if game['complete'] == True:
+                        if game['complete']:
                             continue
 
                         choice = choices[game['number']]
@@ -178,156 +176,6 @@ def compete(model_names: list[str]):
         except Exception as e:
             print(e)
             pass
-        
-
-def get_previous_turn_info(turns):
-    if len(turns) > 0:
-        if turns[-1]['turn_info']['type'] != 'pass':
-            return turns[-1]['turn_info']
-    if len(turns) > 1:
-        if turns[-2]['turn_info']['type'] != 'pass':
-            return turns[-2]['turn_info']
-    return {'type': 'pass', 'size': 0, 'rank': 0}
-
-def get_previous_played(turns):
-    if len(turns) > 0:
-        if turns[-1]['turn_info']['type'] != 'pass':
-            return -1
-    if len(turns) > 1:
-        if turns[-2]['turn_info']['type'] != 'pass':
-            return -2
-    return 0
-
-def can_make_move(move: str, cards_in_hand: dict[str, int]):
-    move_frequency = empty_card_dict()
-    for char in move:
-        move_frequency[char] += 1
-
-    for card, count in move_frequency.items():
-        if cards_in_hand[card] < count:
-            return False
-    return True
-
-def string_to_card_dict(action: str):
-    d = empty_card_dict()
-    for a in action:
-        d[a] += 1
-    return d
-
-def get_move_options(info, hand: dict[str, int]) -> list[dict[str, int]]:
-    options = []
-    actions = []
-    if info['type'] == 'pass':
-        actions = action_space
-
-    else:
-        for rank, values in filtered_options[info['type']][str(info['size'])].items():
-            if int(rank) > info['rank']:
-                actions.extend(values)
-        if info['type'] != 'bomb':
-            for _, sizeToMoves in filtered_options['bomb'].items():
-                for _, values in sizeToMoves.items():
-                    actions.extend(values)
-        if 'BR' not in actions: actions.append('BR')
-        actions.append('')
-
-    for a in actions:
-        if can_make_move(a, hand):
-            opt = string_to_card_dict(a)
-            options.append(opt)
-
-    return options
-
-def remove_choice_from_hand(hand: dict[str, int], move: dict[str, int]):
-    for card, count in move.items():
-        hand[card] -= count
-    return hand
-
-def cards_not_seen(hand: dict[str, int], cards_played: list[dict[str, int]]):
-    full = full_card_dict()
-    for card in full.keys():
-        full[card] -= (hand[card] + cards_played[0][card] + cards_played[1][card] + cards_played[2][card])
-    return full
-
-def remove_move_from_hand_copy(hand: dict[str, int], move: dict[str, int]):
-    hand_copy = hand.copy() 
-    for card, count in move.items():
-        hand_copy[card] -= count
-    return hand_copy
-
-def dict_to_tensor(card_dict: dict[str, int]):
-    tensor = np.zeros(54)
-    for card, count in card_dict.items():
-        for i in range(count):
-            tensor[min(4*rank(card) + i, 53)] = 1
-
-    return np.expand_dims(tensor, axis=0)
-
-def additional_features_tensor(card_dict: dict[str, int]):
-    cards = '3456789TJQKA'
-    l = []
-    for i in range(len(cards)): # 36 straights
-        still_going = True
-        for j in range(i, len(cards)):
-            if card_dict[cards[j]] == 1:
-                still_going = False
-            if j - i >= 4:
-                if still_going == True:
-                    l.append(1)
-                else:
-                    l.append(0)
-
-    for i in range(len(cards)): # 27 pair straights ignoring len > 5
-        still_going = True
-        for j in range(i, len(cards)):
-            if j - i > 4:
-                break
-            if card_dict[cards[j]] < 2:
-                still_going = False
-            if j - i >= 2:
-                if still_going == True:
-                    l.append(1)
-                else:
-                    l.append(0)
-    
-    for i in range(len(cards)): # 21 triple straights ignoring len > 3
-        still_going = True
-        for j in range(i, len(cards)):
-            if j - i > 2:
-                break
-            if card_dict[cards[j]] < 3:
-                still_going = False
-            if j - i >= 1:
-                if still_going == True:
-                    l.append(1)
-                else:
-                    l.append(0)
-    
-    if card_dict['B'] + card_dict['R'] == 2:
-        l.append(1)
-    else:
-        l.append(0)
-
-    tensor = np.zeros(85)
-    for i in range(len(l)):
-        tensor[i] = l[i]
-    return np.expand_dims(tensor, axis=0)
-
-def card_count(card_dict: dict[str, int]):
-    count = 0
-    for _, c in card_dict.items():
-        count += c
-    return count
-
-
-def to_string(card_dict: dict[str, int]):
-    s = ''
-    for card, c in card_dict.items():
-        for _ in range(c):
-            s += card
-    if s == '': 
-        return 'pass'
-    return ''.join(sorted(s, key=rank))
 
 if __name__ == "__main__":
     compete(['deep', 'deep', 'transformer', 'lstm'])
