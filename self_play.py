@@ -1,13 +1,15 @@
-import random
-import numpy as np
-import tensorflow as tf
-from filtered_options import filtered_options
-from action_space import action_space
-from turn_info import get_turn_info
-from cards import empty_card_dict, full_card_dict, landlord_first_shuffle, rank
 import json
-import redis
 import multiprocessing
+import random
+
+import numpy as np
+import redis
+import tensorflow as tf
+
+from action_space import action_space
+from cards import empty_card_dict, full_card_dict, landlord_first_shuffle, rank
+from filtered_options import filtered_options
+from turn_info import get_turn_info
 
 def self_play(partition: int, model_name: str):
     while True:
@@ -269,6 +271,7 @@ def get_previous_played(turns):
         return -2
 
     return 0
+    
 
 def can_make_move(move: str, cards_in_hand: dict[str, int]):
     move_frequency = string_to_card_dict(move)

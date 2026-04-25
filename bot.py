@@ -117,7 +117,7 @@ def run_background_process():
             print(f"pos: {position} cards:{to_string(cards_in_hand)}")
             model = models[position]
             choice = options[0]
-            max_expected_value = -1
+            max_expected_value = float("-inf")
             feature_tensors_list = [[] for _ in range(11)]  
             all_cards_remaining_dicts = []
             for option_dict in options:

@@ -2,7 +2,7 @@ import json
 import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import Any, Optional
 
 from inference import BotInferenceService
 
@@ -14,7 +14,7 @@ class LazyBotService:
     def __init__(self, database_url: str):
         self.database_url = database_url
         self._lock = threading.Lock()
-        self._service: BotInferenceService | None = None
+        self._service: Optional[BotInferenceService] = None
 
     def is_ready(self) -> bool:
         return self._service is not None
