@@ -209,23 +209,65 @@ class NumpyEncoder(json.JSONEncoder):
         if isinstance(obj, np.ndarray):
             return obj.tolist()
         return json.JSONEncoder.default(self, obj)
-    
+
+def _normalize_turn_info(turn_info):
+    if isinstance(turn_info, str):
+        turn_info = json.loads(turn_info)
+
+    return {
+        'type': turn_info.get('type', 'pass'),
+        'size': turn_info.get('size', 0),
+        'rank': turn_info.get('rank', 0),
+    }
+
+def _get_turn_info(turn):
+    if isinstance(turn, dict):
+        if 'turn_info' in turn:
+            return _normalize_turn_info(turn['turn_info'])
+
+        if 'type' in turn:
+            return _normalize_turn_info(turn)
+
+    mapping = getattr(turn, '_mapping', None)
+    if mapping is not None:
+        if 'turn_info' in mapping:
+            return _normalize_turn_info(mapping['turn_info'])
+
+        if 'type' in mapping:
+            return _normalize_turn_info(mapping)
+
+    if hasattr(turn, 'turn_info'):
+        return _normalize_turn_info(turn.turn_info)
+
+    if hasattr(turn, 'type'):
+        return _normalize_turn_info({
+            'type': turn.type,
+            'size': getattr(turn, 'size', 0),
+            'rank': getattr(turn, 'rank', 0),
+        })
+
+    return {'type': 'pass', 'size': 0, 'rank': 0}
+
 def get_previous_turn_info(turns):
-    if len(turns) > 0 and turns[-1]['turn_info']['type'] != 'pass':
-            return turns[-1]['turn_info']
-            
-    if len(turns) > 1 and turns[-2]['turn_info']['type'] != 'pass':
-            return turns[-2]['turn_info']
-            
+    if len(turns) > 0:
+        turn_info = _get_turn_info(turns[-1])
+        if turn_info['type'] != 'pass':
+            return turn_info
+
+    if len(turns) > 1:
+        turn_info = _get_turn_info(turns[-2])
+        if turn_info['type'] != 'pass':
+            return turn_info
+
     return {'type': 'pass', 'size': 0, 'rank': 0}
 
 def get_previous_played(turns):
-    if len(turns) > 0 and turns[-1]['turn_info']['type'] != 'pass':
-            return -1
-    
-    if len(turns) > 1 and turns[-2]['turn_info']['type'] != 'pass':
-            return -2
-    
+    if len(turns) > 0 and _get_turn_info(turns[-1])['type'] != 'pass':
+        return -1
+
+    if len(turns) > 1 and _get_turn_info(turns[-2])['type'] != 'pass':
+        return -2
+
     return 0
 
 def can_make_move(move: str, cards_in_hand: dict[str, int]):

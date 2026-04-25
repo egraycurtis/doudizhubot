@@ -1,1 +1,15 @@
-fly.toml
+*
+!Dockerfile
+!requirements-inference.txt
+!action_space.py
+!cards.py
+!filtered_options.py
+!self_play.py
+!turn_info.py
+!inference.py
+!serve.py
+!models/
+!models/transformer/
+!models/transformer/transformer0.keras
+!models/transformer/transformer1.keras
+!models/transformer/transformer2.keras
