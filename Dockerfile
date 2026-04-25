@@ -1,17 +1,16 @@
-# Use an official Python runtime as a parent image
 FROM python:3.9-slim
 
-# Set the working directory in the container
 WORKDIR /usr/src/app
+ENV PYTHONUNBUFFERED=1
+ENV TF_CPP_MIN_LOG_LEVEL=2
 
-# Copy the current directory contents into the container at /usr/src/app
-COPY . .
+COPY requirements-inference.txt ./
+RUN pip install --no-cache-dir -r requirements-inference.txt
 
-# Install any needed packages specified in requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+COPY action_space.py cards.py filtered_options.py self_play.py turn_info.py ./
+COPY inference.py serve.py ./
+COPY models/transformer/transformer0.keras models/transformer/transformer1.keras models/transformer/transformer2.keras ./models/transformer/
 
-# Make port 8080 available to the world outside this container
 EXPOSE 8080
 
-# Run python script when the container launches
-CMD ["python", "bot.py"]
+CMD ["python", "serve.py"]
