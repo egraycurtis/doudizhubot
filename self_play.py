@@ -129,14 +129,33 @@ def _candidate_action_ids(info: dict[str, int]) -> tuple[int, ...]:
     for rank_value, action_ids in FILTERED_OPTION_ACTION_IDS.get(info["type"], {}).get(str(info["size"]), {}).items():
         if int(rank_value) > info["rank"]:
             candidates.extend(action_ids)
-    if info["type"] != "bomb":
+    # Rocket beats every four-card bomb, but no action beats a rocket.  Other
+    # bomb responses are restricted to a higher four-card bomb or the rocket.
+    if info["type"] == "bomb":
+        if info["size"] == 2:  # rocket
+            candidates = []
+        else:
+            candidates.append(ROCKET_ACTION_ID)
+    else:
         candidates.extend(BOMB_ACTION_IDS)
     candidates.append(PASS_ACTION_ID)
     return tuple(dict.fromkeys(candidates))
 
 
 def get_move_options_with_ids_reference(info, hand: dict[str, int]) -> list[tuple[int, dict[str, int]]]:
-    return [(action_id, ACTION_CARD_DICTS[action_id]) for action_id in _candidate_action_ids(info) if can_make_move(ACTION_CARD_DICTS[action_id], hand)]
+    """Independent, deliberately simple rules oracle for legality tests."""
+    if info["type"] == "pass":
+        allowed = list(OPEN_ACTION_IDS)
+    else:
+        matching, bombs = [], []
+        for action_id, action_info in enumerate(ACTION_INFOS):
+            if action_info["type"] == info["type"] and action_info["size"] == info["size"] and action_info["rank"] > info["rank"] and info["type"] != "bomb":
+                matching.append(action_id)
+            if action_info["type"] == "bomb":
+                if info["type"] != "bomb" or action_info["size"] == 2 or (info["size"] != 2 and action_info["size"] == 4 and action_info["rank"] > info["rank"]):
+                    bombs.append(action_id)
+        allowed = matching + ([] if info["type"] == "bomb" and info["size"] == 2 else bombs) + [PASS_ACTION_ID]
+    return [(action_id, ACTION_CARD_DICTS[action_id]) for action_id in allowed if can_make_move(ACTION_CARD_DICTS[action_id], hand)]
 
 
 def get_move_options_with_ids(info, hand: dict[str, int]) -> list[tuple[int, dict[str, int]]]:
@@ -377,7 +396,7 @@ def play_self_play_batch(partition, model_name, models, game_batch_size=50, expl
     return payload, {"batch_seconds": time.perf_counter() - started, "games": len(game_states), "candidate_rows": candidate_rows, "scored_rows": scored_rows, "random_turns": random_turns, "turns": sum(len(game["turns"]) for game in game_states), "queue_bytes": len(payload)}
 
 
-def self_play(partition, model_name, stop_event=None, max_batches=None, stats_queue=None, queue_key="training_data", max_queue_items=64, game_batch_size=50, explore_rate=0.2, cpu_only=True, use_payout_head=None):
+def self_play(partition, model_name, stop_event=None, max_batches=None, stats_queue=None, queue_key="training_data", max_queue_items=64, game_batch_size=50, explore_rate=0.2, cpu_only=True, use_payout_head=None, seed=None, redis_host="localhost", redis_port=6379, producer_done_queue=None):
     if cpu_only:
         # Actors are CPU-only so the one learner process owns the GPU context.
         try:
@@ -386,7 +405,7 @@ def self_play(partition, model_name, stop_event=None, max_batches=None, stats_qu
             pass
     current_version = get_latest_checkpoint_version(model_name)
     models = load_models(model_name, compile_model=False, version=current_version)
-    client = redis.Redis(host="localhost", port=6379, db=0)
+    client = redis.Redis(host=redis_host, port=redis_port, db=0)
     batches = 0
     while stop_event is None or not stop_event.is_set():
         if max_batches is not None and batches >= max_batches:
@@ -398,11 +417,14 @@ def self_play(partition, model_name, stop_event=None, max_batches=None, stats_qu
         if latest != current_version:
             models = load_models(model_name, compile_model=False, version=latest)
             current_version = latest
-        payload, stats = play_self_play_batch(partition, model_name, models, game_batch_size=game_batch_size, explore_rate=explore_rate, use_payout_head=use_payout_head)
+        # A stream advances per batch while remaining stable across runs.
+        payload, stats = play_self_play_batch(partition, model_name, models, game_batch_size=game_batch_size, explore_rate=explore_rate, use_payout_head=use_payout_head, seed=None if seed is None else seed + batches)
         client.rpush(queue_key, payload)
         if stats_queue is not None:
             stats_queue.put({"kind": "generation", "model_name": model_name, "version": current_version, **stats})
         batches += 1
+    if producer_done_queue is not None:
+        producer_done_queue.put(partition)
 
 
 if __name__ == "__main__":

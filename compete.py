@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import random
 
 import numpy as np
@@ -46,32 +45,35 @@ def _play_deal(models_by_position, model_names_by_position, initial_hands, payou
     raise RuntimeError("deal exceeded 200 turns")
 
 
-def _wilson_interval(wins, total, z=1.96):
-    if not total:
+def _paired_bootstrap_interval(deal_scores, seed=0, samples=2000):
+    """95% percentile interval resampling whole mirrored deal clusters."""
+    if not deal_scores:
         return (0.0, 1.0)
-    p = wins / total
-    denominator = 1 + z * z / total
-    center = (p + z * z / (2 * total)) / denominator
-    radius = z * math.sqrt((p * (1 - p) + z * z / (4 * total)) / total) / denominator
-    return (max(0.0, center - radius), min(1.0, center + radius))
+    rng = random.Random(seed)
+    size = len(deal_scores)
+    means = sorted(sum(deal_scores[rng.randrange(size)] for _ in range(size)) / size for _ in range(samples))
+    return (means[int(0.025 * (samples - 1))], means[int(0.975 * (samples - 1))])
 
 
 def evaluate_families(baseline_model: str, challenger_model: str, deals: int = 100, seed: int = 1, challenger_uses_payout: bool = False):
     """Mirror each deterministic deal: challenger landlord, then challenger peasants."""
     baseline, challenger = load_models(baseline_model, compile_model=False), load_models(challenger_model, compile_model=False)
     challenger_wins = challenger_landlord_wins = challenger_peasant_wins = 0
-    results = []
+    results, deal_scores = [], []
     for deal_index in range(deals):
         random.seed(seed + deal_index)
         hands = landlord_first_shuffle()
         landlord_result = _play_deal([challenger[0], baseline[1], baseline[2]], [challenger_model, baseline_model, baseline_model], hands, frozenset({0}) if challenger_uses_payout else frozenset())
         peasant_result = _play_deal([baseline[0], challenger[1], challenger[2]], [baseline_model, challenger_model, challenger_model], hands, frozenset({1, 2}) if challenger_uses_payout else frozenset())
-        if landlord_result["landlord_won"]:
+        landlord_win = int(landlord_result["landlord_won"])
+        peasant_win = int(not peasant_result["landlord_won"])
+        if landlord_win:
             challenger_wins += 1
             challenger_landlord_wins += 1
-        if not peasant_result["landlord_won"]:
+        if peasant_win:
             challenger_wins += 1
             challenger_peasant_wins += 1
         results.extend((landlord_result, peasant_result))
+        deal_scores.append((landlord_win + peasant_win) / 2.0)
     total = deals * 2
-    return {"baseline": baseline_model, "challenger": challenger_model, "challenger_uses_payout": challenger_uses_payout, "deals": deals, "games": total, "challenger_wins": challenger_wins, "challenger_landlord_wins": challenger_landlord_wins, "challenger_peasant_team_wins": challenger_peasant_wins, "win_rate": challenger_wins / total, "confidence_interval_95": _wilson_interval(challenger_wins, total), "results": results}
+    return {"baseline": baseline_model, "challenger": challenger_model, "challenger_uses_payout": challenger_uses_payout, "deals": deals, "games": total, "challenger_wins": challenger_wins, "challenger_landlord_wins": challenger_landlord_wins, "challenger_peasant_team_wins": challenger_peasant_wins, "win_rate": challenger_wins / total, "confidence_interval_95": _paired_bootstrap_interval(deal_scores, seed=seed), "results": results, "deal_scores": deal_scores}

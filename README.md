@@ -95,12 +95,14 @@ the pinned TensorFlow/Keras schema, not the shell. From WSL2 in this checkout:
 ```bash
 sudo apt-get update
 sudo apt-get install -y python3.10-venv redis-server redis-tools
-python3 -m venv .venv
+python3.10 -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+./.venv/bin/python -m pip install --upgrade pip
+# The Windows NVIDIA driver exposes the GPU to WSL2. Do not install a Linux
+# display driver in WSL. This installs TensorFlow's Linux CUDA user-space deps.
+./.venv/bin/python -m pip install -r requirements-training.txt
 sudo service redis-server start
-bash scripts/wsl2_preflight.sh
+PYTHON=./.venv/bin/python bash scripts/wsl2_preflight.sh --require-gpu
 ```
 
 `nvidia-smi` should work from WSL2 before starting a GPU run. TensorFlow 2.15 is
@@ -115,16 +117,16 @@ Create a short, isolated baseline smoke run. This copies the production models
 into an ignored experimental directory and never writes the originals:
 
 ```bash
-python experiment.py --run-name smoke-v2 --model-name smoke_transformer_v2 \
+./.venv/bin/python experiment.py --run-name smoke-v2 --model-name smoke_transformer_v2 \
   --workers 2 --game-batch-size 5 --max-batches 2 --eval-deals 4
 ```
 
 Run a resumable baseline continuation after the smoke run looks healthy:
 
 ```bash
-python experiment.py --run-name baseline-v2 --model-name transformer_v2 \
+./.venv/bin/python experiment.py --run-name baseline-v2 --model-name transformer_v2 \
   --workers 4 --duration 86400 --eval-every 7200 --eval-deals 100
-python experiment.py --run-name baseline-v2 --model-name transformer_v2 \
+./.venv/bin/python experiment.py --run-name baseline-v2 --model-name transformer_v2 \
   --workers 4 --duration 86400 --resume --eval-every 7200 --eval-deals 100
 ```
 
@@ -135,18 +137,21 @@ payout head only in a separately registered experiment after evaluation supports
 it.
 
 ```bash
-python experiment.py --run-name payout-v1 --model-name transformer_payout_v1 \
+./.venv/bin/python experiment.py --run-name payout-v1 --model-name transformer_payout_v1 \
   --workers 4 --duration 86400 --eval-every 7200 --eval-deals 100
 
 # Only after the fallback run is stable, evaluate the learned payout policy separately.
-python experiment.py --run-name payout-policy-v1 --model-name transformer_payout_v1 \
+./.venv/bin/python experiment.py --run-name payout-policy-v1 --model-name transformer_payout_v1 \
   --workers 4 --duration 86400 --resume --use-payout-head --eval-every 7200 --eval-deals 100
 ```
 
 The evaluator mirrors deterministic deals: once challenger is landlord P0 and
 baseline fills P1/P2; once baseline is landlord and challenger fills both
-peasant roles. Its `win_rate` is therefore a team result and includes a Wilson
-95% confidence interval. Treat intervals spanning 50% as inconclusive.
+peasant roles. Its `win_rate` is therefore a team result. The 95% confidence
+interval bootstraps whole mirrored deal pairs, rather than incorrectly treating
+the two correlated games from one deal as independent. Treat intervals spanning
+50% as inconclusive. Evaluator inference runs in a separate CPU-only process so
+the learner retains exclusive GPU ownership.
 
 ## Portability and troubleshooting
 
@@ -160,7 +165,8 @@ python portability_smoke.py --golden experiments/portability-golden.json
 
 If `redis-cli ping` fails, start Redis before an experiment. If no GPU appears,
 verify the Windows NVIDIA driver and WSL2 GPU support with `nvidia-smi`; CPU
-training remains supported. `queue_items_remaining` that grows continuously
+training remains supported: omit `--require-gpu` and use the same command.
+`queue_items_remaining` that grows continuously
 means reduce actor count or increase learner throughput. Keep `target_mix=0.1`
 for baselines. Exploration, loss, replay, and payout-policy changes are
 intentionally separate experiments rather than bundled changes.

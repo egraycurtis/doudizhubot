@@ -73,6 +73,10 @@ def get_checkpoint_path(model_name: str, position: int, version: int | None = No
 
 
 def load_models(model_name: str, compile_model: bool = False, version: int | None = None) -> list[tf.keras.Model]:
+    # Metadata is atomically published but can advance between loads. Pin one
+    # snapshot for the complete three-role family.
+    if version is None and model_name != PRODUCTION_MODEL_NAME:
+        version = get_latest_checkpoint_version(model_name)
     return [tf.keras.models.load_model(get_checkpoint_path(model_name, position, version), compile=compile_model) for position in range(3)]
 
 
@@ -94,6 +98,14 @@ def _file_sha256(path: Path) -> str:
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def production_model_hashes() -> dict[str, str]:
+    """Read-only portability check for the protected serving checkpoints."""
+    return {
+        f"transformer{position}": _file_sha256(get_checkpoint_path(PRODUCTION_MODEL_NAME, position))
+        for position in range(3)
+    }
 
 
 def _assert_experiment(model_name: str) -> None:

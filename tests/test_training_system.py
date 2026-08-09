@@ -7,11 +7,12 @@ from unittest.mock import patch
 import numpy as np
 
 from cards import empty_card_dict, landlord_first_shuffle
-from compete import evaluate_families, role_mapping
+from compete import _paired_bootstrap_interval, evaluate_families, role_mapping
 from self_play import ACTION_CARD_DICTS, ACTION_ID_BY_STRING, get_move_options_with_ids, get_move_options_with_ids_reference, get_previous_turn_info, select_best_candidate
-from train import normalized_signed_payout
+from train import _replay_payload, normalized_signed_payout
 from training_codec import decode_training_batch, encode_training_batch, hand_to_string
 from turn_info import expected_value
+import model_registry
 
 
 class TrainingSystemTests(unittest.TestCase):
@@ -20,7 +21,27 @@ class TrainingSystemTests(unittest.TestCase):
         for _ in range(30):
             for hand in landlord_first_shuffle():
                 for info in ({"type": "pass", "size": 0, "rank": 0}, {"type": "single", "size": 1, "rank": 0}, {"type": "pair", "size": 2, "rank": 4}, {"type": "bomb", "size": 4, "rank": 2}):
-                    self.assertEqual([item[0] for item in get_move_options_with_ids_reference(info, hand)], [item[0] for item in get_move_options_with_ids(info, hand)])
+                    self.assertEqual({item[0] for item in get_move_options_with_ids_reference(info, hand)}, {item[0] for item in get_move_options_with_ids(info, hand)})
+
+    def test_bomb_responses_include_rocket_but_nothing_beats_rocket(self):
+        hand = empty_card_dict()
+        hand["3"] = 4
+        hand["4"] = 4
+        hand["B"] = hand["R"] = 1
+        ids = {action_id for action_id, _ in get_move_options_with_ids({"type": "bomb", "size": 4, "rank": 0}, hand)}
+        self.assertIn(ACTION_ID_BY_STRING["4444"], ids)
+        self.assertIn(ACTION_ID_BY_STRING["BR"], ids)
+        self.assertIn(ACTION_ID_BY_STRING[""], ids)
+        self.assertNotIn(ACTION_ID_BY_STRING["3333"], ids)
+        self.assertEqual({ACTION_ID_BY_STRING[""]}, {action_id for action_id, _ in get_move_options_with_ids({"type": "bomb", "size": 2, "rank": 14}, hand)})
+
+    def test_replay_uses_final_multiplier_for_all_turns(self):
+        hands = landlord_first_shuffle()
+        payload = encode_training_batch("transformer_payout_v1", [{"hands": [hand_to_string(hand) for hand in hands], "actions": [ACTION_ID_BY_STRING["3"], ACTION_ID_BY_STRING[""], ACTION_ID_BY_STRING["4444"]], "predictions": [0.5, 0.5, 0.5], "landlord_won": True}])
+        _, turns = _replay_payload(payload)
+        self.assertEqual(turns[0][0]["payout"], 2 / 16)
+        self.assertEqual(turns[1][0]["payout"], -2 / 16)
+        self.assertEqual(turns[2][0]["payout"], -2 / 16)
 
     def test_candidate_selection_uses_maximum_not_first(self):
         hand = empty_card_dict()
@@ -43,6 +64,17 @@ class TrainingSystemTests(unittest.TestCase):
 
     def test_role_mapping_is_explicit(self):
         self.assertEqual(role_mapping("transformer_v2"), {0: "transformer_v2", 1: "transformer_v2", 2: "transformer_v2"})
+
+    def test_load_models_pins_one_latest_snapshot(self):
+        with patch("model_registry.get_latest_checkpoint_version", side_effect=[7, 8]) as latest, patch("model_registry.tf.keras.models.load_model", return_value=object()) as load:
+            model_registry.load_models("transformer_v2")
+        self.assertEqual(latest.call_count, 1)
+        self.assertTrue(all("v000007" in str(call.args[0]) for call in load.call_args_list))
+
+    def test_paired_interval_is_deterministic_and_clustered(self):
+        self.assertEqual(_paired_bootstrap_interval([0.0, 1.0], seed=7), _paired_bootstrap_interval([0.0, 1.0], seed=7))
+        self.assertEqual((1.0, 1.0), _paired_bootstrap_interval([1.0], seed=7))
+        self.assertEqual((0.0, 0.0), _paired_bootstrap_interval([0.0], seed=7))
 
     def test_evaluation_balances_mirrored_team_seats(self):
         outcomes = [
