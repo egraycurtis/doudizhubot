@@ -161,3 +161,10 @@ cython_debug/
 
 # MacOS
 .DS_Store
+
+# Generated training runs and experimental checkpoints never replace production models.
+experiments/
+models/transformer_v2/
+models/transformer_payout_v1/
+models/smoke_transformer_v2*/
+models/smoke_transformer_payout_v1*/

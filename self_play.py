@@ -1,385 +1,411 @@
-import random
-import numpy as np
-import tensorflow as tf
-from filtered_options import filtered_options
-from action_space import action_space
-from turn_info import get_turn_info
-from cards import empty_card_dict, full_card_dict, landlord_first_shuffle, rank
+"""Correct, exhaustive self-play primitives shared by training and inference.
+
+Only experimental model families are written by this module.  Production model
+files are loaded read-only and remain the source of truth for serving.
+"""
+
+from __future__ import annotations
+
 import json
-import redis
 import multiprocessing
+import random
+import time
+from typing import Any
 
-def self_play(partition: int, model_name: str):
-    while True:
-        try:
-            models = [tf.keras.models.load_model(f"./models/{model_name}/{model_name}{position}.keras") for position in range(3)]
-            learning_rate = .1
-            game_batch_size = 50
-            game_states = [{
-                'complete': False,
-                'number': i,
-                'show_output': i == 0 and partition == 0,
-                'hands': landlord_first_shuffle(),
-                'turns': [],
-                'cards_played_by_hands': [empty_card_dict(), empty_card_dict(), empty_card_dict()],
-                'cards_seen': empty_card_dict(),
-                'landlord_won': False,
-                } for i in range(game_batch_size)]
-            
-            
-            for turn_number in range(200):
-                position = turn_number%3
-                options_across_games = []
-                tensors_across_games = []
-                option_game_number = []
+import numpy as np
+import redis
+import tensorflow as tf
 
-                feature_tensors_list = [[] for _ in range(10)]
-                if model_name == 'transformer' or model_name == 'lstm':
-                    feature_tensors_list = [[] for _ in range(11)]
-
-                all_games_complete = True
-                for game in game_states:
-                    if game['complete']:
-                        continue
-
-                    all_games_complete = False
-                    
-                    hand = game['hands'][position]
-                    cards_person_on_left_has_played_tensor = dict_to_tensor(game['cards_played_by_hands'][(position-1)%3])
-                    cards_person_on_right_has_played_tensor = dict_to_tensor(game['cards_played_by_hands'][(position+1)%3])
-
-                    turn_info = get_previous_turn_info(game['turns'])
-                    options = get_move_options(turn_info, hand)
-
-                    choice_dict = options[0]
-                    cards_not_seen_dict = cards_not_seen(hand, game['cards_played_by_hands'])
-                    cards_not_seen_tensor = dict_to_tensor(cards_not_seen_dict)
-                    cards_not_seen_additional_features_tensor = additional_features_tensor(cards_not_seen_dict)
-
-                    # if game['show_output']: 
-                    #     print()
-                    #     if position == 0:  print('L')
-                    #     print(to_string(hand))
-
-                    if random.random() < 0.2:
-                        choice_dict = random.choice(options)
-                        options = [choice_dict]
-                        # if game['show_output']: print('random choice')
-                    # else:
-                        # if game['show_output']: print('options:')
-                        
-                    last_played_tensor = create_last_played_tensor(0)
-                    if len(game['turns']) > 0:
-                        if game['turns'][-1]['turn_info']['type'] != 'pass':
-                            last_played_tensor = create_last_played_tensor(1)
-                        elif len(game['turns']) > 1 and game['turns'][-2]['turn_info']['type'] != 'pass':
-                            last_played_tensor = create_last_played_tensor(2)
-
-                    cards_person_on_left_has_left_tensor = cards_left_tensor(game['cards_played_by_hands'], (position - 1)%3)
-                    cards_person_on_right_has_left_tensor = cards_left_tensor(game['cards_played_by_hands'], (position + 1)%3)
-
-                    transformer_tensor = np.zeros((15, 54), dtype=np.float32)
-                    if model_name == 'transformer' or model_name == 'lstm':
-                        transformer_tensor = create_transformer_input(game['turns'])
-
-                    for option_dict in options:
-                        options_across_games.append(option_dict)
-                        option_game_number.append(game['number'])
-
-                        cards_that_would_be_remaining_dict = remove_move_from_hand_copy(hand, option_dict)
-                        feature_tensors = [
-                            cards_not_seen_additional_features_tensor.reshape(85),
-                            additional_features_tensor(cards_that_would_be_remaining_dict).reshape(85),
-                            cards_not_seen_tensor.reshape(54),
-                            cards_person_on_right_has_played_tensor.reshape(54),
-                            cards_person_on_left_has_played_tensor.reshape(54),
-                            dict_to_tensor(option_dict).reshape(54),
-                            dict_to_tensor(cards_that_would_be_remaining_dict).reshape(54),
-                            last_played_tensor.reshape(2),
-                            cards_person_on_left_has_left_tensor.reshape(5),
-                            cards_person_on_right_has_left_tensor.reshape(5),
-                        ]
-
-                        if model_name == 'transformer' or model_name == 'lstm':
-                            feature_tensors.append(transformer_tensor)
-
-                        tensors_across_games.append({
-                            'cards_not_seen_additional_features_tensor': cards_not_seen_additional_features_tensor,
-                            'cards_remaining_additional_feature_tensor': additional_features_tensor(cards_that_would_be_remaining_dict),
-                            'cards_not_seen_tensor': cards_not_seen_tensor,
-                            'cards_person_on_right_has_played_tensor': cards_person_on_right_has_played_tensor,
-                            'cards_person_on_left_has_played_tensor': cards_person_on_left_has_played_tensor,
-                            'choice_tensor': dict_to_tensor(option_dict),
-                            'cards_remaining_tensor': dict_to_tensor(cards_that_would_be_remaining_dict),
-                            'last_played_tensor': last_played_tensor,
-                            'cards_person_on_left_has_left_tensor': cards_person_on_left_has_left_tensor,
-                            'cards_person_on_right_has_left_tensor': cards_person_on_right_has_left_tensor,
-                            'transformer_tensor': transformer_tensor,
-                        })
-
-                        for i, tensor in enumerate(feature_tensors):
-                            feature_tensors_list[i].append(tensor)
-                
-                if all_games_complete:
-                    break
-
-                # print('find max predictions')
-                model_input_tensors = [np.array(feature_list) for feature_list in feature_tensors_list]
-                predictions = models[position].predict(model_input_tensors, verbose=0)
-
-                if predictions.ndim > 1:
-                    predictions = predictions.flatten()
+from action_space import action_space
+from cards import empty_card_dict, full_card_dict, landlord_first_shuffle, rank
+from filtered_options import filtered_options
+from model_registry import get_latest_checkpoint_version, get_model_config, load_models
+from training_codec import encode_training_batch, hand_to_string
+from turn_info import choice_bomb_multiplier, expected_value, get_turn_info
 
 
-                choices = [{'max_prediction': 0, 'tensors': {}, 'option_dict': {}} for _ in range(game_batch_size)]
-                options_to_print = []
-                for i, option_dict in enumerate(options_across_games):
-                    prediction = predictions[i]
-                    game_number = option_game_number[i]
+BASE_FEATURE_KEYS = [
+    "cards_not_seen_additional_features_tensor",
+    "cards_remaining_additional_feature_tensor",
+    "cards_not_seen_tensor",
+    "cards_person_on_right_has_played_tensor",
+    "cards_person_on_left_has_played_tensor",
+    "choice_tensor",
+    "cards_remaining_tensor",
+    "last_played_tensor",
+    "cards_person_on_left_has_left_tensor",
+    "cards_person_on_right_has_left_tensor",
+]
+TRANSFORMER_FEATURE_KEY = "transformer_tensor"
+CARD_KEYS = tuple(empty_card_dict())
 
-                    if game_number == 0 and partition == 0:
-                        options_to_print.append((prediction, option_dict))
-
-                    if prediction > choices[game_number]['max_prediction']:
-                        choices[game_number]['max_prediction'] = prediction
-                        choices[game_number]['tensors'] = tensors_across_games[i]
-                        choices[game_number]['option_dict'] = option_dict
-
-                # options_to_print.sort(key=lambda x: x[0], reverse=True)
-                # for prediction, option_dict in options_to_print:
-                #     print(f"{prediction:.5f} - {to_string(option_dict)}")
-
-                # print('update game states')
-                for game in game_states:
-                    if game['complete']:
-                        continue
-
-                    choice = choices[game['number']]
-                    choice_dict = choice['option_dict']
-                    hand = game['hands'][position]
-
-                    for card, count in choice_dict.items():
-                        game['cards_seen'][card] += count
-                        game['cards_played_by_hands'][position][card] += count
-                
-                    # if game['show_output']: print('choice:', to_string(choice_dict))
-
-                    turn_info = get_turn_info(choice_dict)
-                    game['turns'].append({ 
-                        'turn_info': turn_info,
-                        'prediction': choice['max_prediction'],
-                        'position': position,
-                        'tensors':  choice['tensors'],
-                    })
-                    remove_choice_from_hand(hand, choice_dict)
-                    if card_count(hand) == 0:
-                        game['complete'] = True
-                        if position == 0:
-                            game['landlord_won'] = True
-
-            training_data = {'turns': [], 'model_name': model_name}
-            for game in game_states:
-                for turn in game['turns']:
-                    if (turn['position'] == 0) == game['landlord_won']:
-                        turn['prediction'] += learning_rate * (1 - turn['prediction'])
-                    else:
-                        turn['prediction'] -= learning_rate * turn['prediction']
-                    training_data['turns'].append({'prediction': turn['prediction'], 'tensors': turn['tensors'], 'position': turn['position']})
-
-
-            r = redis.Redis(host='localhost', port=6379, db=0)
-            training_data_json = json.dumps(training_data, cls=NumpyEncoder)        
-            r.rpush('training_data', training_data_json)
-
-        except Exception as e:
-            print(e)
-            pass
-
-def create_transformer_input(turns):
-    transformer_input = np.zeros((15, 54), dtype=np.float32)
-    for i in range(min(len(turns), 15)):
-        transformer_input[i, :] = np.array(turns[-(i+1)]['tensors']['choice_tensor'])
-    
-    return transformer_input
 
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):
-        if isinstance(obj, np.float32):
+        if isinstance(obj, np.floating):
             return float(obj)
         if isinstance(obj, np.ndarray):
             return obj.tolist()
-        return json.JSONEncoder.default(self, obj)
+        return super().default(obj)
+
 
 def _normalize_turn_info(turn_info):
     if isinstance(turn_info, str):
         turn_info = json.loads(turn_info)
+    return {"type": turn_info.get("type", "pass"), "size": turn_info.get("size", 0), "rank": turn_info.get("rank", 0)}
 
-    return {
-        'type': turn_info.get('type', 'pass'),
-        'size': turn_info.get('size', 0),
-        'rank': turn_info.get('rank', 0),
-    }
 
 def _get_turn_info(turn):
     if isinstance(turn, dict):
-        if 'turn_info' in turn:
-            return _normalize_turn_info(turn['turn_info'])
-
-        if 'type' in turn:
-            return _normalize_turn_info(turn)
-
-    mapping = getattr(turn, '_mapping', None)
+        return _normalize_turn_info(turn.get("turn_info", turn))
+    mapping = getattr(turn, "_mapping", None)
     if mapping is not None:
-        if 'turn_info' in mapping:
-            return _normalize_turn_info(mapping['turn_info'])
-
-        if 'type' in mapping:
-            return _normalize_turn_info(mapping)
-
-    if hasattr(turn, 'turn_info'):
+        return _normalize_turn_info(mapping.get("turn_info", mapping))
+    if hasattr(turn, "turn_info"):
         return _normalize_turn_info(turn.turn_info)
+    return {"type": "pass", "size": 0, "rank": 0}
 
-    if hasattr(turn, 'type'):
-        return _normalize_turn_info({
-            'type': turn.type,
-            'size': getattr(turn, 'size', 0),
-            'rank': getattr(turn, 'rank', 0),
-        })
-
-    return {'type': 'pass', 'size': 0, 'rank': 0}
 
 def get_previous_turn_info(turns):
-    if len(turns) > 0:
-        turn_info = _get_turn_info(turns[-1])
-        if turn_info['type'] != 'pass':
-            return turn_info
+    for turn in reversed(turns[-2:]):
+        info = _get_turn_info(turn)
+        if info["type"] != "pass":
+            return info
+    return {"type": "pass", "size": 0, "rank": 0}
 
-    if len(turns) > 1:
-        turn_info = _get_turn_info(turns[-2])
-        if turn_info['type'] != 'pass':
-            return turn_info
-
-    return {'type': 'pass', 'size': 0, 'rank': 0}
 
 def get_previous_played(turns):
-    if len(turns) > 0 and _get_turn_info(turns[-1])['type'] != 'pass':
+    if turns and _get_turn_info(turns[-1])["type"] != "pass":
         return -1
-
-    if len(turns) > 1 and _get_turn_info(turns[-2])['type'] != 'pass':
+    if len(turns) > 1 and _get_turn_info(turns[-2])["type"] != "pass":
         return -2
-
     return 0
-
-def can_make_move(move: str, cards_in_hand: dict[str, int]):
-    move_frequency = string_to_card_dict(move)
-    return all(cards_in_hand[c] >= n for c, n in move_frequency.items())
 
 
 def string_to_card_dict(action: str):
-    d = empty_card_dict()
-    for a in action:
-        d[a] += 1
-    return d
+    result = empty_card_dict()
+    for card in action:
+        result[card] += 1
+    return result
+
+
+ACTION_STRINGS = list(action_space) + ([""] if "" not in action_space else [])
+ACTION_ID_BY_STRING = {action: index for index, action in enumerate(ACTION_STRINGS)}
+ACTION_CARD_DICTS = [string_to_card_dict(action) for action in ACTION_STRINGS]
+ACTION_COUNT_MATRIX = np.asarray([[option[card] for card in CARD_KEYS] for option in ACTION_CARD_DICTS], dtype=np.int8)
+ACTION_INFOS = [get_turn_info(option) for option in ACTION_CARD_DICTS]
+PASS_ACTION_ID = ACTION_ID_BY_STRING[""]
+ROCKET_ACTION_ID = ACTION_ID_BY_STRING["BR"]
+OPEN_ACTION_IDS = tuple(range(len(action_space)))
+ACTION_IS_BOMB = np.asarray([choice_bomb_multiplier(option) > 1 for option in ACTION_CARD_DICTS], dtype=bool)
+
+FILTERED_OPTION_ACTION_IDS = {
+    move_type: {
+        size: {rank_value: [ACTION_ID_BY_STRING[action] for action in actions] for rank_value, actions in ranks.items()}
+        for size, ranks in sizes.items()
+    }
+    for move_type, sizes in filtered_options.items()
+}
+BOMB_ACTION_IDS = tuple(dict.fromkeys(
+    action_id
+    for size_to_moves in FILTERED_OPTION_ACTION_IDS["bomb"].values()
+    for action_ids in size_to_moves.values()
+    for action_id in action_ids
+)) + (ROCKET_ACTION_ID,)
+
+
+def get_action_dict_by_id(action_id: int) -> dict[str, int]:
+    return ACTION_CARD_DICTS[action_id]
+
+
+def can_make_move(move_frequency: dict[str, int], cards_in_hand: dict[str, int]) -> bool:
+    return all(cards_in_hand[card] >= count for card, count in move_frequency.items())
+
+
+def _candidate_action_ids(info: dict[str, int]) -> tuple[int, ...]:
+    if info["type"] == "pass":
+        return OPEN_ACTION_IDS
+    candidates = []
+    for rank_value, action_ids in FILTERED_OPTION_ACTION_IDS.get(info["type"], {}).get(str(info["size"]), {}).items():
+        if int(rank_value) > info["rank"]:
+            candidates.extend(action_ids)
+    if info["type"] != "bomb":
+        candidates.extend(BOMB_ACTION_IDS)
+    candidates.append(PASS_ACTION_ID)
+    return tuple(dict.fromkeys(candidates))
+
+
+def get_move_options_with_ids_reference(info, hand: dict[str, int]) -> list[tuple[int, dict[str, int]]]:
+    return [(action_id, ACTION_CARD_DICTS[action_id]) for action_id in _candidate_action_ids(info) if can_make_move(ACTION_CARD_DICTS[action_id], hand)]
+
+
+def get_move_options_with_ids(info, hand: dict[str, int]) -> list[tuple[int, dict[str, int]]]:
+    """Exact vectorized replacement for the reference per-action card check."""
+    candidate_ids = np.asarray(_candidate_action_ids(info), dtype=np.int32)
+    hand_counts = np.fromiter((hand[card] for card in CARD_KEYS), dtype=np.int8, count=len(CARD_KEYS))
+    legal = np.all(ACTION_COUNT_MATRIX[candidate_ids] <= hand_counts, axis=1)
+    return [(int(action_id), ACTION_CARD_DICTS[int(action_id)]) for action_id in candidate_ids[legal]]
+
 
 def get_move_options(info, hand: dict[str, int]) -> list[dict[str, int]]:
-    options = []
-    actions = []
-    if info['type'] == 'pass':
-        actions = action_space
+    return [option for _, option in get_move_options_with_ids(info, hand)]
 
-    else:
-        for rank, values in filtered_options[info['type']][str(info['size'])].items():
-            if int(rank) > info['rank']:
-                actions.extend(values)
-        if info['type'] != 'bomb':
-            for _, sizeToMoves in filtered_options['bomb'].items():
-                for _, values in sizeToMoves.items():
-                    actions.extend(values)
-        if 'BR' not in actions:
-            actions.append('BR')
-        actions.append('')
 
-    for a in actions:
-        if can_make_move(a, hand):
-            opt = string_to_card_dict(a)
-            options.append(opt)
+def prune_options_for_scoring(options_with_ids, max_scored_options=None):
+    """Compatibility shim: training v2 deliberately scores every legal action."""
+    if max_scored_options is not None:
+        raise ValueError("candidate pruning is disabled: every legal action must be scored")
+    return options_with_ids
 
-    return options
 
-def remove_choice_from_hand(hand: dict[str, int], move: dict[str, int]):
+def remove_choice_from_hand(hand, move):
     for card, count in move.items():
         hand[card] -= count
     return hand
 
-def cards_not_seen(hand: dict[str, int], cards_played: list[dict[str, int]]):
+
+def remove_move_from_hand_copy(hand, move):
+    copied = hand.copy()
+    return remove_choice_from_hand(copied, move)
+
+
+def cards_not_seen(hand, cards_played):
     full = full_card_dict()
-    for card in full.keys():
-        full[card] -= (hand[card] + cards_played[0][card] + cards_played[1][card] + cards_played[2][card])
+    for card in full:
+        full[card] -= hand[card] + sum(played[card] for played in cards_played)
     return full
 
-def remove_move_from_hand_copy(hand: dict[str, int], move: dict[str, int]):
-    hand_copy = hand.copy() 
-    for card, count in move.items():
-        hand_copy[card] -= count
-    return hand_copy
 
-def dict_to_tensor(card_dict: dict[str, int]) -> np.ndarray:
-    tensor = np.zeros(54, dtype=float)
+def dict_to_tensor(card_dict):
+    tensor = np.zeros(54, dtype=np.float32)
     for card, count in card_dict.items():
-        idx = 4 * rank(card)
-        tensor[idx : idx + min(count, 4)] = 1
-    return tensor[None, :] 
+        index = 4 * rank(card)
+        tensor[index : index + min(count, 4)] = 1
+    return tensor[None, :]
 
-def create_last_played_tensor(offset: int) -> np.ndarray:
-    return np.eye(3, 2, k=offset + 1, dtype=float)[0][None, :]
 
-def additional_features_tensor(card_dict: dict[str, int]) -> np.ndarray:
+def create_last_played_tensor(offset):
+    return np.eye(3, 2, k=offset + 1, dtype=np.float32)[0][None, :]
+
+
+def additional_features_tensor(card_dict):
     cards = "3456789TJQKA"
-    features: list[int] = []
-
-    for length in range(5, len(cards) + 1):
-        for start in range(len(cards) - length + 1):
-            window = cards[start : start + length]
-            features.append(int(all(card_dict[c] >= 1 for c in window)))
-
-    for length in range(3, 6):
-        for start in range(len(cards) - length + 1):
-            window = cards[start : start + length]
-            features.append(int(all(card_dict[c] >= 2 for c in window)))
-
-    for length in range(2, 4):
-        for start in range(len(cards) - length + 1):
-            window = cards[start : start + length]
-            features.append(int(all(card_dict[c] >= 3 for c in window)))
+    features = []
+    for length, count in ((length, 1) for length in range(5, len(cards) + 1)):
+        features.extend(int(all(card_dict[card] >= count for card in cards[start : start + length])) for start in range(len(cards) - length + 1))
+    for length, count in ((length, 2) for length in range(3, 6)):
+        features.extend(int(all(card_dict[card] >= count for card in cards[start : start + length])) for start in range(len(cards) - length + 1))
+    for length, count in ((length, 3) for length in range(2, 4)):
+        features.extend(int(all(card_dict[card] >= count for card in cards[start : start + length])) for start in range(len(cards) - length + 1))
+    features.append(int(card_dict["B"] + card_dict["R"] == 2))
+    return np.asarray(features, dtype=np.float32)[None, :]
 
 
-    features.append(int(card_dict.get("B", 0) + card_dict.get("R", 0) == 2))
-
-    return np.array(features, dtype=float)[None, :]
-
-
-def card_count(card_dict: dict[str, int]) -> int:
+def card_count(card_dict):
     return sum(card_dict.values())
 
 
-def cards_left_tensor(played_by_hands: list[dict[str, int]], pos: int) -> np.ndarray:
+def cards_left_tensor(played_by_hands, pos):
     remaining = (20 if pos == 0 else 17) - card_count(played_by_hands[pos])
-    tensor = np.zeros(5, dtype=float)
+    result = np.zeros(5, dtype=np.float32)
     if 1 <= remaining <= 5:
-        tensor[remaining - 1] = 1
-
-    return tensor[None, :]
-
-def to_string(card_dict: dict[str, int]) -> str:
-    s = "".join(card * n for card, n in card_dict.items() for n in range(card_dict[card]))
-    return "pass" if not s else "".join(sorted(s, key=rank))
+        result[remaining - 1] = 1
+    return result[None, :]
 
 
+def to_string(card_dict):
+    return "pass" if not card_count(card_dict) else "".join(sorted((card * count for card, count in card_dict.items()), key=lambda value: rank(value[0])))
+
+
+def create_transformer_input(turns):
+    result = np.zeros((15, 54), dtype=np.float32)
+    for index, turn in enumerate(reversed(turns[-15:])):
+        action_id = turn.get("action_id") if isinstance(turn, dict) else None
+        result[index] = dict_to_tensor(ACTION_CARD_DICTS[action_id]).reshape(54) if action_id is not None else np.asarray(turn["tensors"]["choice_tensor"]).reshape(54)
+    return result
+
+
+def _uses_sequence_history(model_name):
+    return get_model_config(model_name).uses_sequence_history
+
+
+def create_feature_accumulator(model_name):
+    config = get_model_config(model_name)
+    return [[] for _ in range(len(BASE_FEATURE_KEYS) + int(config.uses_sequence_history) + int(config.uses_stake_context))]
+
+
+def build_turn_context(game, position, hand, model_name):
+    played = game["cards_played_by_hands"]
+    unseen = cards_not_seen(hand, played)
+    last = create_last_played_tensor(0)
+    if game["turns"]:
+        last = create_last_played_tensor(1 if game["turns"][-1]["turn_info"]["type"] != "pass" else 2 if len(game["turns"]) > 1 and game["turns"][-2]["turn_info"]["type"] != "pass" else 0)
+    context = {
+        "cards_not_seen_additional_features_tensor": additional_features_tensor(unseen),
+        "cards_not_seen_tensor": dict_to_tensor(unseen),
+        "cards_person_on_right_has_played_tensor": dict_to_tensor(played[(position + 1) % 3]),
+        "cards_person_on_left_has_played_tensor": dict_to_tensor(played[(position - 1) % 3]),
+        "last_played_tensor": last,
+        "cards_person_on_left_has_left_tensor": cards_left_tensor(played, (position - 1) % 3),
+        "cards_person_on_right_has_left_tensor": cards_left_tensor(played, (position + 1) % 3),
+    }
+    if _uses_sequence_history(model_name):
+        context[TRANSFORMER_FEATURE_KEY] = create_transformer_input(game["turns"])
+    return context
+
+
+def stake_context_tensor(position, multiplier):
+    """Versioned challenger-only context: stake, role, and teammate direction."""
+    return np.asarray([[min(multiplier, 16) / 16.0, float(position == 0), float(position != 0), float(position in (1, 2))]], dtype=np.float32)
+
+
+def build_turn_tensors(game, position, hand, choice_dict, model_name, context=None):
+    context = context or build_turn_context(game, position, hand, model_name)
+    remaining = remove_move_from_hand_copy(hand, choice_dict)
+    tensors = {
+        "cards_not_seen_additional_features_tensor": context["cards_not_seen_additional_features_tensor"],
+        "cards_remaining_additional_feature_tensor": additional_features_tensor(remaining),
+        "cards_not_seen_tensor": context["cards_not_seen_tensor"],
+        "cards_person_on_right_has_played_tensor": context["cards_person_on_right_has_played_tensor"],
+        "cards_person_on_left_has_played_tensor": context["cards_person_on_left_has_played_tensor"],
+        "choice_tensor": dict_to_tensor(choice_dict),
+        "cards_remaining_tensor": dict_to_tensor(remaining),
+        "last_played_tensor": context["last_played_tensor"],
+        "cards_person_on_left_has_left_tensor": context["cards_person_on_left_has_left_tensor"],
+        "cards_person_on_right_has_left_tensor": context["cards_person_on_right_has_left_tensor"],
+        TRANSFORMER_FEATURE_KEY: context.get(TRANSFORMER_FEATURE_KEY, np.zeros((15, 54), dtype=np.float32)),
+    }
+    if get_model_config(model_name).uses_stake_context:
+        tensors["stake_context"] = stake_context_tensor(position, game.get("stake_multiplier", 1))
+    return tensors
+
+
+def tensors_to_feature_list(tensors, model_name):
+    shapes = (85, 85, 54, 54, 54, 54, 54, 2, 5, 5)
+    features = [np.asarray(tensors[key]).reshape(shape) for key, shape in zip(BASE_FEATURE_KEYS, shapes)]
+    if _uses_sequence_history(model_name):
+        features.append(np.asarray(tensors[TRANSFORMER_FEATURE_KEY]).reshape(15, 54))
+    if get_model_config(model_name).uses_stake_context:
+        features.append(np.asarray(tensors["stake_context"]).reshape(4))
+    return features
+
+
+def append_choice_features(accumulator, tensors, model_name):
+    for index, feature in enumerate(tensors_to_feature_list(tensors, model_name)):
+        accumulator[index].append(feature)
+
+
+def _direct_predict(model, features):
+    output = model([tf.convert_to_tensor(feature) for feature in features], training=False)
+    if isinstance(output, dict):
+        return np.asarray(output["win_probability"]).reshape(-1), np.asarray(output.get("expected_payout", output["win_probability"])).reshape(-1)
+    if isinstance(output, (list, tuple)):
+        return np.asarray(output[0]).reshape(-1), np.asarray(output[1]).reshape(-1)
+    values = np.asarray(output).reshape(-1)
+    return values, None
+
+
+def select_best_candidate(predictions, option_game_numbers, action_ids, hands, use_payout=False, payout_predictions=None):
+    """Return the true maximum per game; never stop after the first candidate."""
+    choices = {}
+    for index, prediction in enumerate(predictions):
+        game_number = option_game_numbers[index]
+        option = ACTION_CARD_DICTS[action_ids[index]]
+        remaining = remove_move_from_hand_copy(hands[game_number], option)
+        score = float(payout_predictions[index]) if use_payout and payout_predictions is not None else float(expected_value(float(prediction), option, remaining))
+        if game_number not in choices or score > choices[game_number]["score"]:
+            choices[game_number] = {"action_id": action_ids[index], "prediction": float(prediction), "score": score}
+    return choices
+
+
+def _compact_payload(game_states, model_name):
+    return encode_training_batch(model_name, [
+        {"hands": [hand_to_string(hand) for hand in game["initial_hands"]], "actions": [turn["action_id"] for turn in game["turns"]], "predictions": [turn["prediction"] for turn in game["turns"]], "landlord_won": game["landlord_won"]}
+        for game in game_states
+    ])
+
+
+def play_self_play_batch(partition, model_name, models, game_batch_size=50, explore_rate=0.2, seed=None, use_payout_head=None):
+    if seed is not None:
+        random.seed(seed)
+    started = time.perf_counter()
+    config = get_model_config(model_name)
+    use_payout_head = config.use_payout_head if use_payout_head is None else use_payout_head
+    game_states = []
+    for index in range(game_batch_size):
+        initial_hands = landlord_first_shuffle()
+        game_states.append({"complete": False, "number": index, "hands": [hand.copy() for hand in initial_hands], "initial_hands": [hand.copy() for hand in initial_hands], "turns": [], "cards_played_by_hands": [empty_card_dict(), empty_card_dict(), empty_card_dict()], "landlord_won": False, "stake_multiplier": 1})
+    candidate_rows = scored_rows = random_turns = 0
+    for turn_number in range(200):
+        position = turn_number % 3
+        accumulator = create_feature_accumulator(model_name)
+        option_games, action_ids = [], []
+        if all(game["complete"] for game in game_states):
+            break
+        for game in game_states:
+            if game["complete"]:
+                continue
+            options = get_move_options_with_ids(get_previous_turn_info(game["turns"]), game["hands"][position])
+            candidate_rows += len(options)
+            if random.random() < explore_rate:
+                options = [random.choice(options)]
+                random_turns += 1
+            scored_rows += len(options)
+            context = build_turn_context(game, position, game["hands"][position], model_name)
+            for action_id, option in options:
+                tensors = build_turn_tensors(game, position, game["hands"][position], option, model_name, context)
+                append_choice_features(accumulator, tensors, model_name)
+                option_games.append(game["number"])
+                action_ids.append(action_id)
+        features = [np.asarray(values, dtype=np.float32) for values in accumulator]
+        win_predictions, payout_predictions = _direct_predict(models[position], features)
+        choices = select_best_candidate(win_predictions, option_games, action_ids, {game["number"]: game["hands"][position] for game in game_states}, use_payout_head, payout_predictions)
+        for game in game_states:
+            choice = choices.get(game["number"])
+            if game["complete"] or choice is None:
+                continue
+            option = ACTION_CARD_DICTS[choice["action_id"]]
+            game["turns"].append({"turn_info": get_turn_info(option), "position": position, "action_id": choice["action_id"], "prediction": choice["prediction"]})
+            game["stake_multiplier"] *= choice_bomb_multiplier(option)
+            remove_choice_from_hand(game["hands"][position], option)
+            for card, count in option.items():
+                game["cards_played_by_hands"][position][card] += count
+            if card_count(game["hands"][position]) == 0:
+                game["complete"] = True
+                game["landlord_won"] = position == 0
+    payload = _compact_payload(game_states, model_name)
+    return payload, {"batch_seconds": time.perf_counter() - started, "games": len(game_states), "candidate_rows": candidate_rows, "scored_rows": scored_rows, "random_turns": random_turns, "turns": sum(len(game["turns"]) for game in game_states), "queue_bytes": len(payload)}
+
+
+def self_play(partition, model_name, stop_event=None, max_batches=None, stats_queue=None, queue_key="training_data", max_queue_items=64, game_batch_size=50, explore_rate=0.2, cpu_only=True, use_payout_head=None):
+    if cpu_only:
+        # Actors are CPU-only so the one learner process owns the GPU context.
+        try:
+            tf.config.set_visible_devices([], "GPU")
+        except RuntimeError:
+            pass
+    current_version = get_latest_checkpoint_version(model_name)
+    models = load_models(model_name, compile_model=False, version=current_version)
+    client = redis.Redis(host="localhost", port=6379, db=0)
+    batches = 0
+    while stop_event is None or not stop_event.is_set():
+        if max_batches is not None and batches >= max_batches:
+            break
+        if client.llen(queue_key) >= max_queue_items:
+            time.sleep(0.05)
+            continue
+        latest = get_latest_checkpoint_version(model_name)
+        if latest != current_version:
+            models = load_models(model_name, compile_model=False, version=latest)
+            current_version = latest
+        payload, stats = play_self_play_batch(partition, model_name, models, game_batch_size=game_batch_size, explore_rate=explore_rate, use_payout_head=use_payout_head)
+        client.rpush(queue_key, payload)
+        if stats_queue is not None:
+            stats_queue.put({"kind": "generation", "model_name": model_name, "version": current_version, **stats})
+        batches += 1
 
 
 if __name__ == "__main__":
-    models = ['transformer']
-    cpu_count = multiprocessing.cpu_count()
-    tasks = [(i, models[i%len(models)]) for i in range(cpu_count - 2)]
-    with multiprocessing.Pool(processes=cpu_count) as pool:
-        pool.starmap(self_play, tasks)
+    workers = max(1, multiprocessing.cpu_count() - 2)
+    with multiprocessing.get_context("spawn").Pool(workers) as pool:
+        pool.starmap(self_play, [(index, "transformer_v2") for index in range(workers)])
