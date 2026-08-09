@@ -22,14 +22,21 @@ def normalized_signed_payout(position: int, landlord_won: bool, multiplier: int)
     return (1.0 if team_won else -1.0) * min(multiplier, 16) / 16.0
 
 
-def _pop_training_payloads(client, queue_key, min_items=4, max_items=16):
-    if client.llen(queue_key) < min_items:
+def _pop_training_payloads(client, queue_key, min_items=4, max_items=16, drain=False):
+    if client.llen(queue_key) < min_items and not drain:
         return []
     pipeline = client.pipeline()
     pipeline.lrange(queue_key, 0, max_items - 1)
     pipeline.ltrim(queue_key, max_items, -1)
     payloads, _ = pipeline.execute()
     return payloads
+
+
+def _final_multiplier(actions):
+    multiplier = 1
+    for action_id in actions:
+        multiplier *= choice_bomb_multiplier(get_action_dict_by_id(action_id))
+    return multiplier
 
 
 def _replay_payload(raw_payload):
@@ -44,13 +51,15 @@ def _replay_payload(raw_payload):
     for compact_game in payload["games"]:
         hands = [string_to_hand(hand) for hand in compact_game["hands"]]
         state = {"turns": [], "cards_played_by_hands": [empty_card_dict(), empty_card_dict(), empty_card_dict()], "stake_multiplier": 1}
+        final_multiplier = _final_multiplier(compact_game["actions"])
         for turn_index, (action_id, prediction) in enumerate(zip(compact_game["actions"], compact_game["predictions"])):
             position = turn_index % 3
             choice = get_action_dict_by_id(action_id)
             tensors = build_turn_tensors(state, position, hands[position], choice, model_name)
             team_won = compact_game["landlord_won"] if position == 0 else not compact_game["landlord_won"]
             win_target = float(prediction) + (target_mix * (1.0 - float(prediction)) if team_won else -target_mix * float(prediction))
-            turns_by_position[position].append({"prediction": win_target, "payout": normalized_signed_payout(position, compact_game["landlord_won"], state["stake_multiplier"] * choice_bomb_multiplier(choice)), "tensors": tensors, "position": position})
+            # State context is pre-action; target is final realized game payout.
+            turns_by_position[position].append({"prediction": win_target, "payout": normalized_signed_payout(position, compact_game["landlord_won"], final_multiplier), "tensors": tensors, "position": position})
             state["stake_multiplier"] *= choice_bomb_multiplier(choice)
             state["turns"].append({"turn_info": get_turn_info(choice), "action_id": action_id, "position": position})
             for card, count in choice.items():
@@ -87,16 +96,19 @@ def _turns_to_arrays(turns, model_name):
     return x_train, win
 
 
-def train(stop_event=None, max_batches=None, stats_queue=None, queue_key="training_data", min_queue_items=4, max_payloads=16, reconstruction_workers=1):
-    client = redis.Redis(host="localhost", port=6379, db=0)
+def train(stop_event=None, max_batches=None, stats_queue=None, queue_key="training_data", min_queue_items=4, max_payloads=16, reconstruction_workers=1, redis_host="localhost", redis_port=6379, producers_done_event=None):
+    client = redis.Redis(host=redis_host, port=redis_port, db=0)
     loaded_models, versions, dirty, batches_since_save = {}, {}, set(), defaultdict(int)
     completed = 0
     try:
         while stop_event is None or not stop_event.is_set():
             if max_batches is not None and completed >= max_batches:
                 break
-            payloads = _pop_training_payloads(client, queue_key, min_queue_items, max_payloads)
+            draining = producers_done_event is not None and producers_done_event.is_set()
+            payloads = _pop_training_payloads(client, queue_key, min_queue_items, max_payloads, drain=draining)
             if not payloads:
+                if draining:
+                    break
                 time.sleep(0.05)
                 continue
             replay_started = time.perf_counter()

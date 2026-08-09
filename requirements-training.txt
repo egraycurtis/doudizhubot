@@ -1,0 +1,4 @@
+# Minimal WSL2 training environment.  Do not use this for the HTTP serving app.
+tensorflow[and-cuda]==2.15.0
+numpy==1.26.4
+redis>=5.0,<6
