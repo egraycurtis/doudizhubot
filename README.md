@@ -156,8 +156,9 @@ it.
 ./.venv/bin/python experiment.py --run-name payout-v1 --model-name transformer_payout_v1 \
   --workers 4 --duration 86400 --eval-every 7200 --eval-deals 100
 
-# Only after the fallback run is stable, evaluate the learned payout policy separately.
-./.venv/bin/python experiment.py --run-name payout-policy-v1 --model-name transformer_payout_v1 \
+# The same run records a distinct, reproducible payout-policy session. This is
+# the only permitted direction of phase transition; it retains checkpoint provenance.
+./.venv/bin/python experiment.py --run-name payout-v1 --model-name transformer_payout_v1 \
   --workers 4 --duration 86400 --resume --use-payout-head --eval-every 7200 --eval-deals 100
 ```
 
@@ -192,6 +193,18 @@ Each run writes an atomic `sessions.json`. A fresh run with the same configurati
 is reproducible; `--resume` records a new deterministic session epoch so worker
 deal and exploration streams never repeat a prior invocation. A run name or
 experimental model family may not be reused accidentally: choose a new name,
-use `--resume` with a compatible saved configuration, or explicitly use
+use `--resume` with a compatible saved configuration (including the original
+base seed), or explicitly use
 `--reset` to archive the old experiment. Normal completion stops producers first,
 then drains and checkpoints the learner; it requires zero Redis payloads left.
+Interrupted, failed, or incomplete sessions require `--resume --recover`, making
+the recovery decision explicit. A token-owned Redis lease prevents concurrent
+coordinators from writing the same run/model family; wait for its bounded lease
+or recover only after the prior coordinator has stopped.
+To deliberately restart an experimental family, archive both the run and family
+without deleting either:
+
+```bash
+./.venv/bin/python experiment.py --run-name baseline-v2 --model-name transformer_v2 \
+  --workers 4 --duration 86400 --reset --eval-every 7200 --eval-deals 100
+```

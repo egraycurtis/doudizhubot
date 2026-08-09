@@ -31,9 +31,14 @@ def create_payout_challenger(source: tf.keras.Model) -> tf.keras.Model:
     return model
 
 
-def create_challenger_family(destination_model_name: str, source_model_name: str) -> int:
-    from model_registry import get_checkpoint_path, load_models, save_models
+def create_challenger_family(destination_model_name: str, source_model_name: str, source_version: int, source_paths, source_hashes) -> int:
+    from model_registry import get_checkpoint_path, load_models, _atomic_save_model, _write_initial_metadata
 
-    sources = load_models(source_model_name, compile_model=False)
+    sources = load_models(source_model_name, compile_model=False, version=source_version)
     challengers = [create_payout_challenger(source) for source in sources]
-    return save_models(destination_model_name, challengers, version=0, source_model=source_model_name)
+    paths = [get_checkpoint_path(destination_model_name, position, 0) for position in range(3)]
+    for challenger, path in zip(challengers, paths):
+        _atomic_save_model(challenger, path)
+        challenger.save_weights(path.with_suffix(".weights.h5"))
+    _write_initial_metadata(destination_model_name, 0, source_model_name, source_version, source_hashes, paths)
+    return 0

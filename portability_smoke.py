@@ -11,6 +11,15 @@ import numpy as np
 import tensorflow as tf
 
 from model_registry import get_checkpoint_path
+from cards import empty_card_dict, landlord_first_shuffle
+from self_play import build_turn_tensors, get_move_options_with_ids, get_previous_turn_info, remove_choice_from_hand
+from turn_info import get_turn_info
+
+
+# This is a public test/input contract.  Consumers must derive labels and
+# auxiliary inputs from the returned tensors instead of assuming a batch size.
+PROBE_BATCH_SIZE = 6
+BASE_INPUT_SHAPES = ((85,), (85,), (54,), (54,), (54,), (54,), (54,), (2,), (5,), (5,), (15, 54))
 
 
 def _sha256(path: Path) -> str:
@@ -21,23 +30,62 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def fixed_inputs():
-    generator = np.random.default_rng(20260809)
-    return [generator.random((2, *shape), dtype=np.float32) for shape in ((85,), (85,), (54,), (54,), (54,), (54,), (54,), (2,), (5,), (5,), (15, 54))]
+def fixed_inputs(batch_size: int = PROBE_BATCH_SIZE):
+    """Return ``batch_size`` deterministic legal candidates without changing RNG state."""
+    if batch_size <= 0 or batch_size > PROBE_BATCH_SIZE:
+        raise ValueError(f"portability probe supports 1..{PROBE_BATCH_SIZE} samples")
+    import random
+    caller_state = random.getstate()
+    try:
+        random.seed(20260809)
+        hands = landlord_first_shuffle()
+        game = {"turns": [], "cards_played_by_hands": [empty_card_dict(), empty_card_dict(), empty_card_dict()], "stake_multiplier": 1}
+        examples = []
+        for position in range(3):
+            options = get_move_options_with_ids(get_previous_turn_info(game["turns"]), hands[position])
+            for _, choice in (options[0], options[-1]):
+                examples.append(build_turn_tensors(game, position, hands[position], choice, "transformer"))
+            action_id, choice = options[0]
+            game["turns"].append({"turn_info": get_turn_info(choice), "action_id": action_id, "position": position})
+            for card, count in choice.items():
+                game["cards_played_by_hands"][position][card] += count
+            remove_choice_from_hand(hands[position], choice)
+    finally:
+        random.setstate(caller_state)
+    keys = ("cards_not_seen_additional_features_tensor", "cards_remaining_additional_feature_tensor", "cards_not_seen_tensor", "cards_person_on_right_has_played_tensor", "cards_person_on_left_has_played_tensor", "choice_tensor", "cards_remaining_tensor", "last_played_tensor", "cards_person_on_left_has_left_tensor", "cards_person_on_right_has_left_tensor", "transformer_tensor")
+    inputs = [np.asarray([example[key].reshape(shape) for example in examples[:batch_size]], dtype=np.float32) for key, shape in zip(keys, BASE_INPUT_SHAPES)]
+    assert_base_input_contract(inputs, batch_size)
+    return inputs
+
+
+def assert_base_input_contract(inputs, batch_size: int | None = None):
+    """Fail clearly when a caller breaks the production model input contract."""
+    if len(inputs) != len(BASE_INPUT_SHAPES):
+        raise AssertionError(f"expected {len(BASE_INPUT_SHAPES)} base inputs, got {len(inputs)}")
+    actual_batch_size = len(inputs[0]) if inputs else 0
+    if batch_size is not None and actual_batch_size != batch_size:
+        raise AssertionError(f"expected probe batch size {batch_size}, got {actual_batch_size}")
+    for index, (tensor, shape) in enumerate(zip(inputs, BASE_INPUT_SHAPES)):
+        if tensor.shape != (actual_batch_size, *shape):
+            raise AssertionError(f"probe input {index} has shape {tensor.shape}; expected {(actual_batch_size, *shape)}")
+    return actual_batch_size
 
 
 def collect_predictions():
     inputs = fixed_inputs()
+    batch_size = assert_base_input_contract(inputs)
     models = []
     for position in range(3):
         path = get_checkpoint_path("transformer", position)
         model = tf.keras.models.load_model(path, compile=False)
         prediction = np.asarray(model(inputs, training=False)).reshape(-1)
+        if prediction.shape != (batch_size,):
+            raise AssertionError(f"unexpected prediction shape for production model position {position}: {prediction.shape}")
         if not np.isfinite(prediction).all():
             raise AssertionError(f"non-finite prediction from production model position {position}")
         prediction = prediction.tolist()
         models.append({"position": position, "path": str(path), "sha256": _sha256(path), "prediction": prediction})
-    return {"schema_version": 1, "tolerance": 1e-5, "models": models}
+    return {"schema_version": 2, "probe_version": "legal-state-v1", "tolerance": 1e-5, "models": models}
 
 
 def preflight_production_models():
@@ -45,15 +93,26 @@ def preflight_production_models():
     result = collect_predictions()
     for model in result["models"]:
         values = model["prediction"]
+        if max(values) - min(values) < 1e-6 or all(value >= 0.999 for value in values) or all(value <= 0.001 for value in values):
+            raise AssertionError(f"non-discriminating portability probe for position {model['position']}")
         print(f"transformer{model['position']}: loaded; finite predictions in [{min(values):.7f}, {max(values):.7f}]; SHA-256 {model['sha256']}")
     return result
 
 
 def compare(expected, actual):
+    for record in (expected, actual):
+        if record.get("schema_version") != 2 or record.get("probe_version") != "legal-state-v1" or len(record.get("models", [])) != 3:
+            raise AssertionError("golden record has an invalid model/schema probe contract")
     tolerance = float(expected.get("tolerance", 1e-5))
-    for before, after in zip(expected["models"], actual["models"]):
+    for position, (before, after) in enumerate(zip(expected["models"], actual["models"])):
+        if before.get("position") != position or after.get("position") != position:
+            raise AssertionError("golden record positions are missing or reordered")
         if before["sha256"] != after["sha256"]:
             raise AssertionError(f"model hash changed for position {before['position']}")
+        if np.asarray(before["prediction"]).shape != np.asarray(after["prediction"]).shape:
+            raise AssertionError(f"prediction shape changed for position {position}")
+        if np.all(np.asarray(after["prediction"]) >= 0.999) or np.all(np.asarray(after["prediction"]) <= 0.001):
+            raise AssertionError(f"saturated portability probe for position {position}")
         if not np.allclose(before["prediction"], after["prediction"], rtol=tolerance, atol=tolerance):
             raise AssertionError(f"prediction drift exceeds {tolerance} for position {before['position']}")
 

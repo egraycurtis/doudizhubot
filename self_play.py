@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import hashlib
 import multiprocessing
+import signal
 import random
 import time
 from typing import Any
@@ -403,7 +404,14 @@ def play_self_play_batch(partition, model_name, models, game_batch_size=50, expl
     return payload, {"batch_seconds": time.perf_counter() - started, "games": len(game_states), "candidate_rows": candidate_rows, "scored_rows": scored_rows, "random_turns": random_turns, "turns": sum(len(game["turns"]) for game in game_states), "queue_bytes": len(payload)}
 
 
-def self_play(partition, model_name, stop_event=None, producer_stop_event=None, max_batches=None, stats_queue=None, queue_key="training_data", max_queue_items=64, game_batch_size=50, explore_rate=0.2, cpu_only=True, use_payout_head=None, seed=None, redis_host="localhost", redis_port=6379, producer_done_queue=None):
+def install_worker_signal_policy():
+    """Keep Ctrl+C ownership in the coordinator process under POSIX/WSL."""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
+def self_play(partition, model_name, stop_event=None, producer_stop_event=None, max_batches=None, stats_queue=None, queue_key="training_data", max_queue_items=64, game_batch_size=50, explore_rate=0.2, cpu_only=True, use_payout_head=None, seed=None, redis_host="localhost", redis_port=6379, ignore_sigint=False):
+    if ignore_sigint:
+        install_worker_signal_policy()
     if cpu_only:
         # Actors are CPU-only so the one learner process owns the GPU context.
         try:
@@ -414,8 +422,16 @@ def self_play(partition, model_name, stop_event=None, producer_stop_event=None, 
     models = load_models(model_name, compile_model=False, version=current_version)
     client = redis.Redis(host=redis_host, port=redis_port, db=0)
     batches = 0
-    while (stop_event is None or not stop_event.is_set()) and (producer_stop_event is None or not producer_stop_event.is_set()):
+    reason = "producer_stop"
+    while True:
+        if stop_event is not None and stop_event.is_set():
+            reason = "abort"
+            break
+        if producer_stop_event is not None and producer_stop_event.is_set():
+            reason = "producer_stop"
+            break
         if max_batches is not None and batches >= max_batches:
+            reason = "max_batches"
             break
         if client.llen(queue_key) >= max_queue_items:
             time.sleep(0.05)
@@ -430,8 +446,9 @@ def self_play(partition, model_name, stop_event=None, producer_stop_event=None, 
         if stats_queue is not None:
             stats_queue.put({"kind": "generation", "model_name": model_name, "version": current_version, **stats})
         batches += 1
-    if producer_done_queue is not None:
-        producer_done_queue.put(partition)
+    completion = {"kind": "producer_complete", "actor": partition, "batches": batches, "games": batches * game_batch_size, "reason": reason}
+    if stats_queue is not None:
+        stats_queue.put(completion)
 
 
 if __name__ == "__main__":

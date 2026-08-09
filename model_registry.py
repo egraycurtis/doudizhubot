@@ -65,6 +65,15 @@ def get_latest_checkpoint_version(model_name: str) -> int:
     return int(_metadata(model_name).get("version", 0))
 
 
+def archive_destination(path: Path) -> Path:
+    """Return a collision-safe archive name without mutating either path."""
+    candidate, suffix = path.with_name(f"{path.name}.archived"), 1
+    while candidate.exists():
+        candidate = path.with_name(f"{path.name}.archived-{suffix}")
+        suffix += 1
+    return candidate
+
+
 def get_checkpoint_path(model_name: str, position: int, version: int | None = None) -> Path:
     if model_name == PRODUCTION_MODEL_NAME:
         return get_model_dir(model_name) / f"transformer{position}.keras"
@@ -108,6 +117,32 @@ def production_model_hashes() -> dict[str, str]:
     }
 
 
+def validate_experiment_family(model_name: str, source_model: str | None = None) -> dict:
+    """Validate one complete, immutable checkpoint snapshot before resuming."""
+    _assert_experiment(model_name)
+    directory, metadata_path = get_model_dir(model_name), get_metadata_path(model_name)
+    if not directory.is_dir() or not metadata_path.is_file():
+        raise ValueError(f"cannot resume: experimental family {model_name!r} is missing; recover its directory or start a new run")
+    metadata = _metadata(model_name)
+    config = get_model_config(model_name)
+    if metadata.get("model_name") != model_name or metadata.get("schema_version") != config.schema_version:
+        raise ValueError("cannot resume: experimental model metadata has an incompatible schema")
+    if metadata.get("config") != asdict(config):
+        raise ValueError("cannot resume: experimental model metadata does not match its registered configuration")
+    if source_model is not None and metadata.get("source_model") != source_model:
+        raise ValueError("cannot resume: experimental model source does not match the run")
+    version, names, hashes = metadata.get("version"), metadata.get("checkpoints"), metadata.get("sha256")
+    if not isinstance(version, int) or not isinstance(names, list) or not isinstance(hashes, list) or len(names) != 3 or len(hashes) != 3:
+        raise ValueError("cannot resume: experimental model metadata is incomplete")
+    for position, (name, expected_hash) in enumerate(zip(names, hashes)):
+        path = get_checkpoint_path(model_name, position, version)
+        if name != path.name or not path.is_file():
+            raise ValueError(f"cannot resume: checkpoint for role {position} at version {version} is missing")
+        if _file_sha256(path) != expected_hash:
+            raise ValueError(f"cannot resume: checkpoint hash mismatch for role {position}; restore the matching family")
+    return metadata
+
+
 def _assert_experiment(model_name: str) -> None:
     if model_name == PRODUCTION_MODEL_NAME or model_name not in EXPERIMENT_MODEL_NAMES:
         raise ValueError(f"refusing to write model family {model_name!r}; production models are read-only")
@@ -123,6 +158,7 @@ def save_models(model_name: str, models_to_save: list[tf.keras.Model], version: 
     for model, path in zip(models_to_save, paths):
         _atomic_save_model(model, path)
         model.save_weights(path.with_suffix(".weights.h5"))
+    previous = _metadata(model_name)
     metadata = {
         "version": version,
         "model_name": model_name,
@@ -132,6 +168,11 @@ def save_models(model_name: str, models_to_save: list[tf.keras.Model], version: 
         "sha256": [_file_sha256(path) for path in paths],
         "config": asdict(config),
     }
+    # Source provenance describes the immutable family used to initialize this
+    # experiment, not the most recent learner checkpoint.
+    for key in ("source_version", "source_sha256"):
+        if key in previous:
+            metadata[key] = previous[key]
     _atomic_write_text(get_metadata_path(model_name), json.dumps(metadata, indent=2, sort_keys=True))
     keep_from = version - config.keep_checkpoint_versions + 1
     for path in directory.glob(f"{model_name}[0-2]_v*.keras"):
@@ -142,16 +183,56 @@ def save_models(model_name: str, models_to_save: list[tf.keras.Model], version: 
     return version
 
 
-def _copy_source_family(destination: str, source: str) -> int:
+def _source_snapshot(source: str) -> tuple[int, list[Path], list[str]]:
+    """Resolve one immutable source family version for all three role copies."""
+    if source == PRODUCTION_MODEL_NAME:
+        version = 0
+        paths = [get_checkpoint_path(source, position, version) for position in range(3)]
+        return version, paths, [_file_sha256(path) for path in paths]
+    metadata = validate_experiment_family(source)
+    version = int(metadata["version"])
+    paths = [get_checkpoint_path(source, position, version) for position in range(3)]
+    return version, paths, list(metadata["sha256"])
+
+
+def _validate_transfer_compatibility(destination: str, source: str, source_version: int) -> None:
+    """Reject accidental wrapping/copying of a different input/head schema."""
+    destination_config, source_config = get_model_config(destination), get_model_config(source)
+    if source_config.uses_stake_context:
+        raise ValueError("stake-aware payout families cannot be used as transfer sources")
+    if destination_config.uses_stake_context and source_config.uses_stake_context:
+        raise ValueError("payout challengers must be initialized from a one-head base family")
+    source_models = load_models(source, compile_model=False, version=source_version)
+    expected_inputs = 11
+    for position, source_model in enumerate(source_models):
+        if len(source_model.inputs) != expected_inputs or len(source_model.outputs) != 1:
+            raise ValueError(f"source role {position} is not a compatible one-head transformer checkpoint")
+
+
+def _write_initial_metadata(destination: str, version: int, source: str, source_version: int, source_hashes: list[str], paths: list[Path]) -> None:
+    config = get_model_config(destination)
+    _atomic_write_text(get_metadata_path(destination), json.dumps({
+        "version": version,
+        "model_name": destination,
+        "schema_version": config.schema_version,
+        "source_model": source,
+        "source_version": source_version,
+        "source_sha256": source_hashes,
+        "checkpoints": [path.name for path in paths],
+        "sha256": [_file_sha256(path) for path in paths],
+        "config": asdict(config),
+    }, indent=2, sort_keys=True))
+
+
+def _copy_source_family(destination: str, source: str, source_version: int, source_paths: list[Path], source_hashes: list[str]) -> int:
     paths = []
     for position in range(3):
-        source_path = get_checkpoint_path(source, position)
+        source_path = source_paths[position]
         destination_path = get_checkpoint_path(destination, position, 0)
         shutil.copy2(source_path, destination_path)
         tf.keras.models.load_model(destination_path, compile=False).save_weights(destination_path.with_suffix(".weights.h5"))
         paths.append(destination_path)
-    config = get_model_config(destination)
-    _atomic_write_text(get_metadata_path(destination), json.dumps({"version": 0, "model_name": destination, "schema_version": config.schema_version, "source_model": source, "checkpoints": [path.name for path in paths], "sha256": [_file_sha256(path) for path in paths], "config": asdict(config)}, indent=2, sort_keys=True))
+    _write_initial_metadata(destination, 0, source, source_version, source_hashes, paths)
     return 0
 
 
@@ -161,18 +242,15 @@ def initialize_model_family(model_name: str, source_model_name: str = PRODUCTION
     if directory.exists() and get_metadata_path(model_name).exists() and not force_reset:
         return get_latest_checkpoint_version(model_name)
     if directory.exists() and force_reset:
-        archive = directory.with_name(f"{directory.name}.archived")
-        suffix = 1
-        while archive.exists():
-            archive = directory.with_name(f"{directory.name}.archived-{suffix}")
-            suffix += 1
-        directory.rename(archive)
+        directory.rename(archive_destination(directory))
     directory.mkdir(parents=True, exist_ok=True)
+    source_version, source_paths, source_hashes = _source_snapshot(source_model_name)
+    _validate_transfer_compatibility(model_name, source_model_name, source_version)
     if model_name.endswith("payout_v1"):
         from payout_challenger import create_challenger_family
 
-        return create_challenger_family(model_name, source_model_name)
-    return _copy_source_family(model_name, source_model_name)
+        return create_challenger_family(model_name, source_model_name, source_version, source_paths, source_hashes)
+    return _copy_source_family(model_name, source_model_name, source_version, source_paths, source_hashes)
 
 
 def transformer_block(x, num_heads: int, ff_dim: int):
