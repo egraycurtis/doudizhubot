@@ -1,0 +1,4 @@
+# Minimal CPU-only trainer environment for WSL2/Linux smoke tests.
+tensorflow==2.15.0
+numpy==1.26.4
+redis>=5.0,<6

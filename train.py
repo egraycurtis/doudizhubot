@@ -134,11 +134,18 @@ def train(stop_event=None, max_batches=None, stats_queue=None, queue_key="traini
                     batches_since_save[model_name] = 0
                     dirty.remove(model_name)
                 if stats_queue is not None:
-                    stats_queue.put({"kind": "learner", "model_name": model_name, "examples": examples, "replay_seconds": replay_seconds, "fit_seconds": time.perf_counter() - fit_started - checkpoint_seconds, "checkpoint_seconds": checkpoint_seconds, "version": versions[model_name]})
+                    stats_queue.put({"kind": "learner", "model_name": model_name, "examples": examples, "replay_seconds": replay_seconds, "fit_seconds": time.perf_counter() - fit_started - checkpoint_seconds, "checkpoint_seconds": checkpoint_seconds, "version": versions[model_name], "durable_checkpoint": checkpoint_seconds > 0})
             completed += 1
     finally:
         for model_name in dirty:
-            save_models(model_name, loaded_models[model_name], source_model="transformer")
+            checkpoint_started = time.perf_counter()
+            versions[model_name] = save_models(model_name, loaded_models[model_name], source_model="transformer")
+            checkpoint_seconds = time.perf_counter() - checkpoint_started
+            if stats_queue is not None:
+                # This final metric must be consumed before the coordinator
+                # summarizes a normal drain, otherwise checkpoint accounting
+                # can falsely report an empty learner run.
+                stats_queue.put({"kind": "learner", "model_name": model_name, "examples": 0, "replay_seconds": 0.0, "fit_seconds": 0.0, "checkpoint_seconds": checkpoint_seconds, "version": versions[model_name], "durable_checkpoint": True, "final_checkpoint": True})
 
 
 if __name__ == "__main__":

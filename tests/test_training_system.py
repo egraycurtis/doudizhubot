@@ -7,12 +7,13 @@ from unittest.mock import patch
 import numpy as np
 
 from cards import empty_card_dict, landlord_first_shuffle
-from compete import _paired_bootstrap_interval, evaluate_families, role_mapping
-from self_play import ACTION_CARD_DICTS, ACTION_ID_BY_STRING, get_move_options_with_ids, get_move_options_with_ids_reference, get_previous_turn_info, select_best_candidate
+from compete import _paired_hoeffding_interval, evaluate_families, role_mapping
+from self_play import ACTION_CARD_DICTS, ACTION_ID_BY_STRING, batch_seed, get_move_options_with_ids, get_move_options_with_ids_reference, get_previous_turn_info, select_best_candidate
 from train import _replay_payload, normalized_signed_payout
 from training_codec import decode_training_batch, encode_training_batch, hand_to_string
 from turn_info import expected_value
 import model_registry
+import portability_smoke
 
 
 class TrainingSystemTests(unittest.TestCase):
@@ -71,10 +72,29 @@ class TrainingSystemTests(unittest.TestCase):
         self.assertEqual(latest.call_count, 1)
         self.assertTrue(all("v000007" in str(call.args[0]) for call in load.call_args_list))
 
-    def test_paired_interval_is_deterministic_and_clustered(self):
-        self.assertEqual(_paired_bootstrap_interval([0.0, 1.0], seed=7), _paired_bootstrap_interval([0.0, 1.0], seed=7))
-        self.assertEqual((1.0, 1.0), _paired_bootstrap_interval([1.0], seed=7))
-        self.assertEqual((0.0, 0.0), _paired_bootstrap_interval([0.0], seed=7))
+    def test_paired_hoeffding_interval_is_honest_at_boundaries(self):
+        with self.assertRaises(ValueError):
+            _paired_hoeffding_interval([])
+        self.assertEqual(_paired_hoeffding_interval([0.0, 1.0]), _paired_hoeffding_interval([0.0, 1.0]))
+        one_win = _paired_hoeffding_interval([1.0])
+        many_wins = _paired_hoeffding_interval([1.0] * 100)
+        one_loss = _paired_hoeffding_interval([0.0])
+        identical = _paired_hoeffding_interval([0.5] * 8)
+        mixed = _paired_hoeffding_interval([0.0, 0.5, 1.0, 0.5])
+        self.assertEqual(one_win[1], 1.0)
+        self.assertLess(one_win[0], 1.0)
+        self.assertEqual(one_loss[0], 0.0)
+        self.assertGreater(one_loss[1], 0.0)
+        self.assertLess(many_wins[1] - many_wins[0], one_win[1] - one_win[0])
+        self.assertLess(identical[0], 0.5)
+        self.assertGreater(identical[1], 0.5)
+        self.assertLess(mixed[0], 0.5)
+        self.assertGreater(mixed[1], 0.5)
+
+    def test_batch_seed_streams_are_stable_and_non_overlapping(self):
+        self.assertEqual(batch_seed(10, 0), batch_seed(10, 0))
+        self.assertNotEqual(batch_seed(10, 0), batch_seed(10, 1))
+        self.assertNotEqual(batch_seed(10, 0), batch_seed(11, 0))
 
     def test_evaluation_balances_mirrored_team_seats(self):
         outcomes = [
@@ -100,6 +120,11 @@ class TrainingSystemTests(unittest.TestCase):
         remaining = empty_card_dict()
         self.assertLess(expected_value(0.45, bomb, remaining), expected_value(0.45, regular, remaining))
         self.assertGreater(expected_value(0.80, bomb, remaining), expected_value(0.80, regular, remaining))
+
+    def test_portability_preflight_uses_loaded_finite_predictions(self):
+        record = {"models": [{"position": 0, "prediction": [0.1, 0.9], "sha256": "x"}]}
+        with patch("portability_smoke.collect_predictions", return_value=record):
+            self.assertEqual(portability_smoke.preflight_production_models(), record)
 
 
 if __name__ == "__main__":

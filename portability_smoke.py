@@ -32,9 +32,21 @@ def collect_predictions():
     for position in range(3):
         path = get_checkpoint_path("transformer", position)
         model = tf.keras.models.load_model(path, compile=False)
-        prediction = np.asarray(model(inputs, training=False)).reshape(-1).tolist()
+        prediction = np.asarray(model(inputs, training=False)).reshape(-1)
+        if not np.isfinite(prediction).all():
+            raise AssertionError(f"non-finite prediction from production model position {position}")
+        prediction = prediction.tolist()
         models.append({"position": position, "path": str(path), "sha256": _sha256(path), "prediction": prediction})
     return {"schema_version": 1, "tolerance": 1e-5, "models": models}
+
+
+def preflight_production_models():
+    """Load every protected model and exercise the exact fixed input schema."""
+    result = collect_predictions()
+    for model in result["models"]:
+        values = model["prediction"]
+        print(f"transformer{model['position']}: loaded; finite predictions in [{min(values):.7f}, {max(values):.7f}]; SHA-256 {model['sha256']}")
+    return result
 
 
 def compare(expected, actual):
@@ -50,7 +62,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--golden", type=Path, default=Path("experiments/portability-golden.json"))
     parser.add_argument("--write", action="store_true")
+    parser.add_argument("--preflight", action="store_true", help="load all production models and run fixed-schema inference")
     args = parser.parse_args()
+    if args.preflight:
+        preflight_production_models()
+        return
     actual = collect_predictions()
     if args.write:
         args.golden.parent.mkdir(parents=True, exist_ok=True)
