@@ -89,8 +89,17 @@ published. Metrics are JSONL at `experiments/<run>/metrics.jsonl`.
 
 ## WSL2 setup (recommended for the GTX 1080 Ti)
 
-Use Ubuntu under WSL2, not native Command Prompt. Model portability depends on
-the pinned TensorFlow/Keras schema, not the shell. From WSL2 in this checkout:
+Use Ubuntu 22.04 under WSL2, not native Command Prompt. From an elevated
+Windows PowerShell, install or verify that distro with:
+
+```powershell
+wsl --install -d Ubuntu-22.04
+wsl -l -v
+```
+
+If `Ubuntu-22.04` is already listed, start it with `wsl -d Ubuntu-22.04`.
+Model portability depends on the pinned TensorFlow/Keras schema, not the shell.
+From that WSL2 distro in this checkout:
 
 ```bash
 sudo apt-get update
@@ -105,11 +114,18 @@ sudo service redis-server start
 PYTHON=./.venv/bin/python bash scripts/wsl2_preflight.sh --require-gpu
 ```
 
-`nvidia-smi` should work from WSL2 before starting a GPU run. TensorFlow 2.15 is
+`nvidia-smi` should work from WSL2 before starting a GPU run. The preflight
+loads all three protected `.keras` models and runs fixed-schema inference before
+it permits a run. TensorFlow 2.15 is
 intentional: it remains compatible with the saved Keras 2.15 artifacts and the
 Pascal GTX 1080 Ti. Actors hide the GPU; the learner uses it if TensorFlow sees
 it. Start with `workers = physical CPU cores - 2`, then reduce it if the learner
 is continuously backlogged.
+
+For a genuinely minimal CPU-only smoke environment, use
+`./.venv/bin/python -m pip install -r requirements-training-cpu.txt` instead.
+It intentionally does not download TensorFlow's CUDA extras; omit
+`--require-gpu` when running preflight in that environment.
 
 ## Commands
 
@@ -148,9 +164,10 @@ it.
 The evaluator mirrors deterministic deals: once challenger is landlord P0 and
 baseline fills P1/P2; once baseline is landlord and challenger fills both
 peasant roles. Its `win_rate` is therefore a team result. The 95% confidence
-interval bootstraps whole mirrored deal pairs, rather than incorrectly treating
-the two correlated games from one deal as independent. Treat intervals spanning
-50% as inconclusive. Evaluator inference runs in a separate CPU-only process so
+interval, `paired_hoeffding_interval_95`, is a conservative bounded interval
+over whole mirrored deal scores. It deliberately remains wide for small samples
+or all-win/all-loss samples rather than reporting false certainty. Treat
+intervals spanning 50% as inconclusive. Evaluator inference runs in a separate CPU-only process so
 the learner retains exclusive GPU ownership.
 
 ## Portability and troubleshooting
@@ -159,8 +176,8 @@ Create a golden record on the current machine, then copy only that JSON file to
 WSL2 and compare there. GPU results are tolerance-based (`1e-5`), not bit exact.
 
 ```bash
-python portability_smoke.py --golden experiments/portability-golden.json --write
-python portability_smoke.py --golden experiments/portability-golden.json
+./.venv/bin/python portability_smoke.py --golden experiments/portability-golden.json --write
+./.venv/bin/python portability_smoke.py --golden experiments/portability-golden.json
 ```
 
 If `redis-cli ping` fails, start Redis before an experiment. If no GPU appears,
@@ -170,3 +187,11 @@ training remains supported: omit `--require-gpu` and use the same command.
 means reduce actor count or increase learner throughput. Keep `target_mix=0.1`
 for baselines. Exploration, loss, replay, and payout-policy changes are
 intentionally separate experiments rather than bundled changes.
+
+Each run writes an atomic `sessions.json`. A fresh run with the same configuration
+is reproducible; `--resume` records a new deterministic session epoch so worker
+deal and exploration streams never repeat a prior invocation. A run name or
+experimental model family may not be reused accidentally: choose a new name,
+use `--resume` with a compatible saved configuration, or explicitly use
+`--reset` to archive the old experiment. Normal completion stops producers first,
+then drains and checkpoints the learner; it requires zero Redis payloads left.

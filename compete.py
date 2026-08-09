@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import random
 
 import numpy as np
@@ -45,18 +46,22 @@ def _play_deal(models_by_position, model_names_by_position, initial_hands, payou
     raise RuntimeError("deal exceeded 200 turns")
 
 
-def _paired_bootstrap_interval(deal_scores, seed=0, samples=2000):
-    """95% percentile interval resampling whole mirrored deal clusters."""
+def _paired_hoeffding_interval(deal_scores, confidence=0.95):
+    """Distribution-free interval over independent mirrored-deal scores in [0, 1]."""
     if not deal_scores:
-        return (0.0, 1.0)
-    rng = random.Random(seed)
+        raise ValueError("at least one mirrored deal is required")
+    if not 0 < confidence < 1:
+        raise ValueError("confidence must be between zero and one")
     size = len(deal_scores)
-    means = sorted(sum(deal_scores[rng.randrange(size)] for _ in range(size)) / size for _ in range(samples))
-    return (means[int(0.025 * (samples - 1))], means[int(0.975 * (samples - 1))])
+    mean = sum(deal_scores) / size
+    radius = math.sqrt(math.log(2 / (1 - confidence)) / (2 * size))
+    return (max(0.0, mean - radius), min(1.0, mean + radius))
 
 
 def evaluate_families(baseline_model: str, challenger_model: str, deals: int = 100, seed: int = 1, challenger_uses_payout: bool = False):
     """Mirror each deterministic deal: challenger landlord, then challenger peasants."""
+    if deals <= 0:
+        raise ValueError("deals must be positive")
     baseline, challenger = load_models(baseline_model, compile_model=False), load_models(challenger_model, compile_model=False)
     challenger_wins = challenger_landlord_wins = challenger_peasant_wins = 0
     results, deal_scores = [], []
@@ -76,4 +81,4 @@ def evaluate_families(baseline_model: str, challenger_model: str, deals: int = 1
         results.extend((landlord_result, peasant_result))
         deal_scores.append((landlord_win + peasant_win) / 2.0)
     total = deals * 2
-    return {"baseline": baseline_model, "challenger": challenger_model, "challenger_uses_payout": challenger_uses_payout, "deals": deals, "games": total, "challenger_wins": challenger_wins, "challenger_landlord_wins": challenger_landlord_wins, "challenger_peasant_team_wins": challenger_peasant_wins, "win_rate": challenger_wins / total, "confidence_interval_95": _paired_bootstrap_interval(deal_scores, seed=seed), "results": results, "deal_scores": deal_scores}
+    return {"baseline": baseline_model, "challenger": challenger_model, "challenger_uses_payout": challenger_uses_payout, "deals": deals, "games": total, "challenger_wins": challenger_wins, "challenger_landlord_wins": challenger_landlord_wins, "challenger_peasant_team_wins": challenger_peasant_wins, "win_rate": challenger_wins / total, "paired_hoeffding_interval_95": _paired_hoeffding_interval(deal_scores), "results": results, "deal_scores": deal_scores}
