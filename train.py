@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
+import json
 import time
 
 import numpy as np
 import redis
 
 from cards import empty_card_dict
-from model_registry import get_latest_checkpoint_version, get_model_config, load_models, save_models
+from model_registry import get_latest_checkpoint_version, get_model_config, get_metadata_path, load_models, save_models
 from self_play import build_turn_tensors, get_action_dict_by_id, remove_choice_from_hand
 from training_codec import TRAJECTORY_FORMAT, decode_training_batch, string_to_hand
 from turn_info import choice_bomb_multiplier, get_turn_info
@@ -129,7 +130,8 @@ def train(stop_event=None, max_batches=None, stats_queue=None, queue_key="traini
                 checkpoint_seconds = 0.0
                 if batches_since_save[model_name] >= get_model_config(model_name).checkpoint_interval_batches:
                     checkpoint_started = time.perf_counter()
-                    versions[model_name] = save_models(model_name, loaded_models[model_name], source_model="transformer")
+                    source_model = json.loads(get_metadata_path(model_name).read_text()).get("source_model")
+                    versions[model_name] = save_models(model_name, loaded_models[model_name], source_model=source_model)
                     checkpoint_seconds = time.perf_counter() - checkpoint_started
                     batches_since_save[model_name] = 0
                     dirty.remove(model_name)
@@ -139,7 +141,8 @@ def train(stop_event=None, max_batches=None, stats_queue=None, queue_key="traini
     finally:
         for model_name in dirty:
             checkpoint_started = time.perf_counter()
-            versions[model_name] = save_models(model_name, loaded_models[model_name], source_model="transformer")
+            source_model = json.loads(get_metadata_path(model_name).read_text()).get("source_model")
+            versions[model_name] = save_models(model_name, loaded_models[model_name], source_model=source_model)
             checkpoint_seconds = time.perf_counter() - checkpoint_started
             if stats_queue is not None:
                 # This final metric must be consumed before the coordinator

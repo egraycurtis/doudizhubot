@@ -65,6 +65,15 @@ def get_latest_checkpoint_version(model_name: str) -> int:
     return int(_metadata(model_name).get("version", 0))
 
 
+def archive_destination(path: Path) -> Path:
+    """Return a collision-safe archive name without mutating either path."""
+    candidate, suffix = path.with_name(f"{path.name}.archived"), 1
+    while candidate.exists():
+        candidate = path.with_name(f"{path.name}.archived-{suffix}")
+        suffix += 1
+    return candidate
+
+
 def get_checkpoint_path(model_name: str, position: int, version: int | None = None) -> Path:
     if model_name == PRODUCTION_MODEL_NAME:
         return get_model_dir(model_name) / f"transformer{position}.keras"
@@ -106,6 +115,30 @@ def production_model_hashes() -> dict[str, str]:
         f"transformer{position}": _file_sha256(get_checkpoint_path(PRODUCTION_MODEL_NAME, position))
         for position in range(3)
     }
+
+
+def validate_experiment_family(model_name: str, source_model: str | None = None) -> dict:
+    """Validate one complete, immutable checkpoint snapshot before resuming."""
+    _assert_experiment(model_name)
+    directory, metadata_path = get_model_dir(model_name), get_metadata_path(model_name)
+    if not directory.is_dir() or not metadata_path.is_file():
+        raise ValueError(f"cannot resume: experimental family {model_name!r} is missing; recover its directory or start a new run")
+    metadata = _metadata(model_name)
+    config = get_model_config(model_name)
+    if metadata.get("model_name") != model_name or metadata.get("schema_version") != config.schema_version:
+        raise ValueError("cannot resume: experimental model metadata has an incompatible schema")
+    if source_model is not None and metadata.get("source_model") != source_model:
+        raise ValueError("cannot resume: experimental model source does not match the run")
+    version, names, hashes = metadata.get("version"), metadata.get("checkpoints"), metadata.get("sha256")
+    if not isinstance(version, int) or not isinstance(names, list) or not isinstance(hashes, list) or len(names) != 3 or len(hashes) != 3:
+        raise ValueError("cannot resume: experimental model metadata is incomplete")
+    for position, (name, expected_hash) in enumerate(zip(names, hashes)):
+        path = get_checkpoint_path(model_name, position, version)
+        if name != path.name or not path.is_file():
+            raise ValueError(f"cannot resume: checkpoint for role {position} at version {version} is missing")
+        if _file_sha256(path) != expected_hash:
+            raise ValueError(f"cannot resume: checkpoint hash mismatch for role {position}; restore the matching family")
+    return metadata
 
 
 def _assert_experiment(model_name: str) -> None:
@@ -161,12 +194,7 @@ def initialize_model_family(model_name: str, source_model_name: str = PRODUCTION
     if directory.exists() and get_metadata_path(model_name).exists() and not force_reset:
         return get_latest_checkpoint_version(model_name)
     if directory.exists() and force_reset:
-        archive = directory.with_name(f"{directory.name}.archived")
-        suffix = 1
-        while archive.exists():
-            archive = directory.with_name(f"{directory.name}.archived-{suffix}")
-            suffix += 1
-        directory.rename(archive)
+        directory.rename(archive_destination(directory))
     directory.mkdir(parents=True, exist_ok=True)
     if model_name.endswith("payout_v1"):
         from payout_challenger import create_challenger_family

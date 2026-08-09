@@ -430,8 +430,11 @@ def self_play(partition, model_name, stop_event=None, producer_stop_event=None, 
         if stats_queue is not None:
             stats_queue.put({"kind": "generation", "model_name": model_name, "version": current_version, **stats})
         batches += 1
+    completion = {"kind": "producer_complete", "actor": partition, "batches": batches, "games": batches * game_batch_size}
+    if stats_queue is not None:
+        stats_queue.put(completion)
     if producer_done_queue is not None:
-        producer_done_queue.put(partition)
+        producer_done_queue.put(completion)
 
 
 if __name__ == "__main__":

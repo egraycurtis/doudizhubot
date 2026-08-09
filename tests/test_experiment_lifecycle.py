@@ -166,6 +166,34 @@ class ExperimentLifecycleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "workers"):
             experiment.validate_args(validation_args)
 
+    def test_reset_archives_both_artifacts_and_rollback_restores_them(self):
+        run, family = Path(self.directory.name) / "run", Path(self.directory.name) / "family"
+        run.mkdir(); family.mkdir()
+        (run / "old").write_text("run"); (family / "old").write_text("family")
+        (Path(self.directory.name) / "run.archived").mkdir()
+        moved = experiment._reset_artifacts(run, family)
+        self.assertFalse(run.exists())
+        self.assertTrue(all(destination.exists() for destination in moved.values()))
+        run.mkdir(); family.mkdir()
+        experiment._rollback_reset(moved, run, family)
+        self.assertEqual((run / "old").read_text(), "run")
+        self.assertEqual((family / "old").read_text(), "family")
+        self.assertTrue(any(path.name.startswith("run.failed-init") for path in Path(self.directory.name).iterdir()))
+
+    def test_seed_is_resume_identity_and_payout_phase_is_one_way(self):
+        args = Namespace(run_name="phase", model_name="transformer_payout_v1", source_model="transformer", baseline_model="transformer", use_payout_head=False, seed=9, reset=False, resume=False)
+        with patch("experiment.get_model_dir", return_value=Path(self.directory.name) / "models" / "family"):
+            experiment._prepare_run_directory(args, Path(self.directory.name) / "phase")
+            args.resume = True
+            args.use_payout_head = True
+            experiment._prepare_run_directory(args, Path(self.directory.name) / "phase")
+            args.use_payout_head = False
+            with self.assertRaisesRegex(ValueError, "payout-policy"):
+                experiment._prepare_run_directory(args, Path(self.directory.name) / "phase")
+            args.use_payout_head, args.seed = True, 10
+            with self.assertRaisesRegex(ValueError, "incompatible"):
+                experiment._prepare_run_directory(args, Path(self.directory.name) / "phase")
+
     def test_evaluation_reads_large_result_before_child_join(self):
         evaluator = FakeProcess("cpu-evaluator", alive=True, stop_on_join=False)
         result = {"results": ["x" * 100_000]}
