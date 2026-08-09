@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 import json
+import signal
 import time
 
 import numpy as np
@@ -97,7 +98,14 @@ def _turns_to_arrays(turns, model_name):
     return x_train, win
 
 
-def train(stop_event=None, max_batches=None, stats_queue=None, queue_key="training_data", min_queue_items=4, max_payloads=16, reconstruction_workers=1, redis_host="localhost", redis_port=6379, producers_done_event=None):
+def install_worker_signal_policy():
+    """The coordinator alone turns Ctrl+C into a drain/abort transition."""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
+def train(stop_event=None, max_batches=None, stats_queue=None, queue_key="training_data", min_queue_items=4, max_payloads=16, reconstruction_workers=1, redis_host="localhost", redis_port=6379, producers_done_event=None, ignore_sigint=False):
+    if ignore_sigint:
+        install_worker_signal_policy()
     client = redis.Redis(host=redis_host, port=redis_port, db=0)
     loaded_models, versions, dirty, batches_since_save = {}, {}, set(), defaultdict(int)
     completed = 0

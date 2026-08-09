@@ -197,6 +197,10 @@ use `--resume` with a compatible saved configuration (including the original
 base seed), or explicitly use
 `--reset` to archive the old experiment. Normal completion stops producers first,
 then drains and checkpoints the learner; it requires zero Redis payloads left.
+Interrupted, failed, or incomplete sessions require `--resume --recover`, making
+the recovery decision explicit. A token-owned Redis lease prevents concurrent
+coordinators from writing the same run/model family; wait for its bounded lease
+or recover only after the prior coordinator has stopped.
 To deliberately restart an experimental family, archive both the run and family
 without deleting either:
 
