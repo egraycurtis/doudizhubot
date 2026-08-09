@@ -75,12 +75,92 @@ I built this game based on our house rules. It's mostly the same rules you'll fi
 
 **models/transformer/transformermodel.py** - Final architechture for the model I landed on.
 
-# Installation
+# Training System V2
 
-clone this repo
+Training v2 leaves `models/transformer/transformer0.keras`,
+`transformer1.keras`, and `transformer2.keras` read-only. It has three explicit
+role checkpoints: position `0` is landlord, and positions `1` and `2` are the
+two peasant roles. Every legal action is scored; there is no top-k move pruning.
 
-docker compose up
+The topology is deliberately simple: CPU-only self-play actors generate compact
+trajectories into a bounded Redis queue while one resident learner owns the GPU.
+Models are reloaded by actors only after a versioned, atomic checkpoint is
+published. Metrics are JSONL at `experiments/<run>/metrics.jsonl`.
 
-(python 3.10) pip install -r requirements.txt
+## WSL2 setup (recommended for the GTX 1080 Ti)
 
-python main.py (or whatever)
+Use Ubuntu under WSL2, not native Command Prompt. Model portability depends on
+the pinned TensorFlow/Keras schema, not the shell. From WSL2 in this checkout:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y python3.10-venv redis-server redis-tools
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+sudo service redis-server start
+bash scripts/wsl2_preflight.sh
+```
+
+`nvidia-smi` should work from WSL2 before starting a GPU run. TensorFlow 2.15 is
+intentional: it remains compatible with the saved Keras 2.15 artifacts and the
+Pascal GTX 1080 Ti. Actors hide the GPU; the learner uses it if TensorFlow sees
+it. Start with `workers = physical CPU cores - 2`, then reduce it if the learner
+is continuously backlogged.
+
+## Commands
+
+Create a short, isolated baseline smoke run. This copies the production models
+into an ignored experimental directory and never writes the originals:
+
+```bash
+python experiment.py --run-name smoke-v2 --model-name smoke_transformer_v2 \
+  --workers 2 --game-batch-size 5 --max-batches 2 --eval-deals 4
+```
+
+Run a resumable baseline continuation after the smoke run looks healthy:
+
+```bash
+python experiment.py --run-name baseline-v2 --model-name transformer_v2 \
+  --workers 4 --duration 86400 --eval-every 7200 --eval-deals 100
+python experiment.py --run-name baseline-v2 --model-name transformer_v2 \
+  --workers 4 --duration 86400 --resume --eval-every 7200 --eval-deals 100
+```
+
+Run the transfer-initialized stake-aware challenger. It retains the exact old
+win head and adds a normalized signed expected-payout head. During warmup it
+continues choosing with the old production-compatible EV fallback; enable the
+payout head only in a separately registered experiment after evaluation supports
+it.
+
+```bash
+python experiment.py --run-name payout-v1 --model-name transformer_payout_v1 \
+  --workers 4 --duration 86400 --eval-every 7200 --eval-deals 100
+
+# Only after the fallback run is stable, evaluate the learned payout policy separately.
+python experiment.py --run-name payout-policy-v1 --model-name transformer_payout_v1 \
+  --workers 4 --duration 86400 --resume --use-payout-head --eval-every 7200 --eval-deals 100
+```
+
+The evaluator mirrors deterministic deals: once challenger is landlord P0 and
+baseline fills P1/P2; once baseline is landlord and challenger fills both
+peasant roles. Its `win_rate` is therefore a team result and includes a Wilson
+95% confidence interval. Treat intervals spanning 50% as inconclusive.
+
+## Portability and troubleshooting
+
+Create a golden record on the current machine, then copy only that JSON file to
+WSL2 and compare there. GPU results are tolerance-based (`1e-5`), not bit exact.
+
+```bash
+python portability_smoke.py --golden experiments/portability-golden.json --write
+python portability_smoke.py --golden experiments/portability-golden.json
+```
+
+If `redis-cli ping` fails, start Redis before an experiment. If no GPU appears,
+verify the Windows NVIDIA driver and WSL2 GPU support with `nvidia-smi`; CPU
+training remains supported. `queue_items_remaining` that grows continuously
+means reduce actor count or increase learner throughput. Keep `target_mix=0.1`
+for baselines. Exploration, loss, replay, and payout-policy changes are
+intentionally separate experiments rather than bundled changes.
